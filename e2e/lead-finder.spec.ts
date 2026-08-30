@@ -48,7 +48,7 @@ async function signIn(page: Page, email: string, password: string) {
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL("**/");
-  await expect(page.getByRole("heading", { name: "Pipeline" })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole("heading", { name: "Here's what's happening" })).toBeVisible({ timeout: 15000 });
 }
 
 test.describe.serial("Lead Finder", () => {
@@ -93,32 +93,28 @@ test.describe.serial("Lead Finder", () => {
     await page.waitForURL("**/leads");
     await expect(page.getByRole("heading", { name: "Lead Finder" })).toBeVisible();
 
-    // Search via county GIS path (local, no Zillow scrape). county=Mecklenburg + address.
-    // LeadSearchBar: county select + address input + Find leads button
+    // Search Wake County tax records — real public data (verified live: "love" returns parcels).
     const countySelect = page.locator("select").first();
-    await countySelect.selectOption("Mecklenburg");
+    await countySelect.selectOption("Wake");
 
     const addressInput = page.getByPlaceholder("123 Main St or parcel PIN");
-    await addressInput.fill(leadAddress);
+    await addressInput.fill("love");
 
-    // Use the county_gis path — do NOT hit Zillow in E2E (mock or pure county_gis)
-    // The Search button triggers POST /api/lead-search with sources ["county_gis","zillow"].
-    // The zillow provider degrades to a warning; the county_gis guidance card always returns.
+    // The Search button triggers POST /api/lead-search with sources ["county_gis","tax_records"].
     await page.getByRole("button", { name: "Find leads" }).click();
 
-    // Expect a county_gis guidance card (since no real scrape, county_gis returns a result)
-    // LeadResults badge: county_gis (blue) plus the address text and disclaimer portal link
-    await expect(page.getByText(leadAddress).first()).toBeVisible({ timeout: 15000 });
-    await expect(page.getByText("county_gis").first()).toBeVisible();
-    // Guidance disclaimer contains portal URL fragment — proves county_gis path ran, not fake rows
-    await expect(page.getByText(/Portal:/).first()).toBeVisible();
+    // Expect a real Wake tax-parcel card with a Score button (proves live data, not mock).
+    await expect(page.getByText("Tax record").first()).toBeVisible({ timeout: 20000 });
+    // Parcel owner detail is present on the real card.
+    await expect(page.getByText(/Assessed/).first()).toBeVisible({ timeout: 10000 });
 
     // Click Score → see deterministic underwriting sheet (70% MAO etc.)
     await page.getByRole("button", { name: "Score" }).first().click();
 
     const sheet = page.locator("#lead-score-sheet");
     await expect(sheet).toBeVisible({ timeout: 10000 });
-    await expect(sheet.getByText(`Score: ${leadAddress}`)).toBeVisible();
+    // Sheet heading is the real parcel address (starts with "Score: ").
+    await expect(sheet.getByText(/^Score: /)).toBeVisible();
     // Deterministic sheet always shows the 70% MAO provenance line, even when inputs are incomplete
     await expect(sheet.getByText("Deterministic underwriting")).toBeVisible();
     // When ARV/purchasePrice are missing, the sheet shows the placeholder rather than fabricating numbers
@@ -158,12 +154,14 @@ test.describe.serial("Lead Finder", () => {
     const deal = (dealsJson as { deal?: { id: string } }).deal;
     if (deal?.id) createdDealIds.push(deal.id);
 
-    await expect(page.getByText(`Added ${leadAddress} to pipeline`)).toBeVisible({ timeout: 10000 });
+    // Toast uses the real parcel address (from the card we clicked).
+    const realAddress = (deal as { address?: string } | undefined)?.address ?? "";
+    await expect(page.getByText(new RegExp(`Added .* to pipeline`))).toBeVisible({ timeout: 10000 });
 
-    // Deal appears on the Kanban board
+    // Deal appears on the Kanban board under its real address.
     await page.goto("/board");
     await page.waitForURL("**/board");
-    await expect(page.getByText(leadAddress).first()).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText(realAddress, { exact: false }).first()).toBeVisible({ timeout: 15000 });
   });
 
   test("Contractor Finder → Verify (no green on uncertainty)", async ({ page }) => {

@@ -9,8 +9,17 @@ export interface ListingCard {
   year_built?: number;
   photo_url?: string;
   source: "county_gis" | "api";
-  source_label: string; // "county_gis" | "zillow"
+  source_label: string; // "county_gis" | "zillow" | "wake_tax_parcel"
   disclaimer?: string;
+  parcel?: {
+    pin?: string;
+    owner?: string;
+    assessedValue?: number;
+    landValue?: number;
+    buildingValue?: number;
+    acreage?: number;
+    lastSaleDate?: string;
+  };
 }
 export interface ListingSource {
   id: "county_gis" | "zillow";

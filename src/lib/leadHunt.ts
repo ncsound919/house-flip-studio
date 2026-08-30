@@ -1,4 +1,4 @@
-import { fetchZillow } from "@/lib/listingSources/zillow";
+import { fetchCountyParcels } from "@/lib/listingSources/countyParcels";
 import { getCountyGuidance } from "@/lib/countyGis";
 import { scoreLead } from "@/lib/leadScoring";
 import type { ListingCard } from "@/lib/listingSources/types";
@@ -59,16 +59,15 @@ export async function huntLeads(config: HuntConfig): Promise<HuntResult> {
     }
 
     let listings: ListingCard[] = [];
-    try {
-      listings = await fetchZillow({ county });
-    } catch {
-      result.warnings.push(`Zillow unavailable for ${county} — check county GIS manually`);
-    }
-
-    // County guidance is the honest fallback signal even when scrape fails.
-    const guidance = getCountyGuidance(county);
-    if (guidance) {
-      listings = listings.slice(0, config.maxPerCounty);
+    const parcel = await fetchCountyParcels({ county, max: config.maxPerCounty });
+    if (parcel.status === "not_connected") {
+      result.warnings.push(
+        `${county} county data feed not connected yet — add leads manually via the lead finder`
+      );
+    } else if (parcel.error) {
+      result.warnings.push(`County data feed error for ${county}: ${parcel.error}`);
+    } else {
+      listings = parcel.cards;
     }
 
     for (const listing of listings) {
@@ -90,7 +89,7 @@ export async function huntLeads(config: HuntConfig): Promise<HuntResult> {
         state: "NC",
         photo_url: listing.photo_url ?? null,
         stage: "Lead",
-        source: listing.source === "county_gis" ? "county_gis" : "api",
+        source: "county_gis",
         asking_price: listing.price ?? null,
         sqft: listing.sqft ?? null,
         beds: listing.beds ?? null,
@@ -98,6 +97,13 @@ export async function huntLeads(config: HuntConfig): Promise<HuntResult> {
         year_built: listing.year_built ?? null,
         notes: [
           `Auto-found by lead hunt (${listing.source_label}).`,
+          listing.parcel?.owner ? `Owner: ${listing.parcel.owner}` : "",
+          listing.parcel?.assessedValue
+            ? `Assessed value: $${listing.parcel.assessedValue.toLocaleString("en-US")}`
+            : "",
+          listing.parcel?.acreage
+            ? `Acreage: ${listing.parcel.acreage}`
+            : "",
           scored.flags.length ? `Flags: ${scored.flags.join("; ")}` : "",
           scored.needsArv ? "No ARV known — score is a feasibility signal, not a verdict." : "",
         ]

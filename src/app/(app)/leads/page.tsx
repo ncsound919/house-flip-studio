@@ -29,7 +29,7 @@ export default function LeadsPage() {
       const res = await fetch("/api/lead-search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ county: nextCounty, address: nextAddress, sources: ["county_gis", "zillow"] }),
+        body: JSON.stringify({ county: nextCounty, address: nextAddress, sources: ["county_gis", "tax_records"] }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Search failed");
@@ -92,7 +92,7 @@ export default function LeadsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold text-zinc-900">Lead Finder</h1>
-        <p className="text-sm text-zinc-500">Search county GIS + Zillow listings. Score any lead with deterministic underwriting, then add to pipeline.</p>
+        <p className="text-sm text-zinc-500">Search real county tax-record leads, score any lead with deterministic underwriting, then add to pipeline.</p>
       </div>
 
       <LeadSearchBar county={county} address={address} onSearch={handleSearch} loading={loading} />
@@ -113,7 +113,7 @@ export default function LeadsPage() {
         <div className="rounded-xl border border-dashed border-zinc-300 bg-white p-10 text-center">
           <p className="text-sm font-medium text-zinc-700">Enter a county and optional address to find leads</p>
           <p className="mt-1 text-sm text-zinc-500">
-            County GIS returns portal guidance. Zillow listings appear when available (marked as scraped / unverified).
+            Wake County returns real tax-record parcels. Other counties show manual-entry guidance until their feed is connected.
           </p>
         </div>
       ) : loading ? (

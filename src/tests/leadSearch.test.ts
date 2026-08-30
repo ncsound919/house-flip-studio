@@ -1,6 +1,4 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { readFileSync } from "fs";
-import path from "path";
 
 // Mock auth — route requires requireOrgId() org check
 vi.mock("@/lib/apiHelpers", () => ({
@@ -11,11 +9,35 @@ vi.mock("@/lib/apiHelpers", () => ({
 
 import { POST } from "@/app/api/lead-search/route";
 
-function mockFetchWithHtml(html: string, ok = true, status = 200) {
+// Real ArcGIS parcel JSON shape (what Wake's FeatureServer returns)
+const wakeParcelsJson = {
+  features: [
+    {
+      attributes: {
+        OBJECTID: 1,
+        PIN_NUM: "0695327712",
+        SITE_ADDRESS: "7712 BILL LOVE RD",
+        OWNER: "GURRAM, ANANDA PAPIREDDY",
+        CITY_DECODE: "Raleigh",
+        TOTAL_VALUE_ASSD: 619967,
+        LAND_VAL: 141675,
+        BLDG_VAL: 478292,
+        YEAR_BUILT: 2018,
+        HEATEDAREA: 2163,
+        TOTSALPRICE: 795000,
+        SALE_DATE: 1734307200000,
+        CALC_AREA: 4.81,
+        DEED_ACRES: 4.81,
+      },
+    },
+  ],
+};
+
+function mockFetchJson(json: unknown, ok = true, status = 200) {
   return vi.fn().mockResolvedValue({
     ok,
     status,
-    text: async () => html,
+    json: async () => json,
   });
 }
 
@@ -27,12 +49,7 @@ function makeRequest(body: unknown) {
   });
 }
 
-describe("/api/lead-search", () => {
-  const zillowSampleHtml = readFileSync(
-    path.resolve("src/tests/fixtures/zillowSample.html"),
-    "utf-8"
-  );
-
+describe("/api/lead-search (real tax-record source)", () => {
   let originalFetch: typeof fetch;
 
   beforeEach(() => {
@@ -45,93 +62,80 @@ describe("/api/lead-search", () => {
     vi.restoreAllMocks();
   });
 
-  it("merges county_gis guidance + zillow listings, shape { results, warnings }", async () => {
-    global.fetch = mockFetchWithHtml(zillowSampleHtml) as unknown as typeof fetch;
+  it("returns real Wake tax parcels + guidance card", async () => {
+    global.fetch = mockFetchJson(wakeParcelsJson) as unknown as typeof fetch;
 
     const req = makeRequest({
-      county: "Mecklenburg",
-      address: "123 Main",
-      sources: ["county_gis", "zillow"],
+      county: "Wake",
+      address: "love",
+      sources: ["county_gis", "tax_records"],
     });
 
     const res = await POST(req);
     const json = await res.json();
 
     expect(res.status).toBe(200);
-    expect(json).toHaveProperty("results");
-    expect(json).toHaveProperty("warnings");
     expect(Array.isArray(json.results)).toBe(true);
     expect(Array.isArray(json.warnings)).toBe(true);
 
-    // Should have county_gis guidance card + zillow cards
-    const gisCards = json.results.filter((c: { source: string }) => c.source === "county_gis");
-    const zillowCards = json.results.filter((c: { source: string }) => c.source === "api");
+    const parcelCards = json.results.filter((c: { source_label: string }) => c.source_label === "wake_tax_parcel");
+    expect(parcelCards.length).toBe(1);
+    expect(parcelCards[0].address).toBe("7712 BILL LOVE RD");
+    expect(parcelCards[0].price).toBe(795000);
+    expect(parcelCards[0].sqft).toBe(2163);
+    expect(parcelCards[0].year_built).toBe(2018);
+    expect(parcelCards[0].source).toBe("county_gis");
+    expect(parcelCards[0].parcel?.owner).toContain("GURRAM");
+    expect(parcelCards[0].parcel?.assessedValue).toBe(619967);
 
+    // guidance card still present
+    const gisCards = json.results.filter((c: { source_label: string }) => c.source_label === "county_gis");
     expect(gisCards.length).toBeGreaterThanOrEqual(1);
-    expect(gisCards[0].source_label).toBe("county_gis");
-    expect(gisCards[0].disclaimer).toBeDefined();
-
-    expect(zillowCards.length).toBeGreaterThan(0);
-    expect(zillowCards[0].source_label).toBe("zillow");
-    expect(zillowCards[0].disclaimer).toMatch(/Scraped data/);
   });
 
-  it("returns guidance fallback + zillow warning when zillow fetch fails (500)", async () => {
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 500,
-      text: async () => "",
-    }) as unknown as typeof fetch;
+  it("warns when county tax-record feed is not connected (e.g. Mecklenburg)", async () => {
+    global.fetch = vi.fn() as unknown as typeof fetch; // should not be called
 
     const req = makeRequest({
       county: "Mecklenburg",
       address: "123 Main",
-      sources: ["county_gis", "zillow"],
+      sources: ["county_gis", "tax_records"],
     });
 
     const res = await POST(req);
     const json = await res.json();
 
     expect(res.status).toBe(200);
-    // county_gis guidance card still present
-    expect(json.results.length).toBeGreaterThanOrEqual(1);
-    const gisCards = json.results.filter((c: { source: string }) => c.source === "county_gis");
+    expect(json.warnings.join(" ").toLowerCase()).toContain("not connected");
+    // guidance still present
+    const gisCards = json.results.filter((c: { source_label: string }) => c.source_label === "county_gis");
     expect(gisCards.length).toBeGreaterThanOrEqual(1);
-
-    // warnings must mention zillow
-    expect(json.warnings.join(" ").toLowerCase()).toContain("zillow");
   });
 
-  it("all-empty zillow scrape yields results: [] + warnings containing zillow when only zillow requested and fetch fails", async () => {
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 500,
-      text: async () => "",
-    }) as unknown as typeof fetch;
+  it("warns when the county API returns an error", async () => {
+    global.fetch = mockFetchJson({ error: { message: "Layer locked" } }) as unknown as typeof fetch;
 
     const req = makeRequest({
-      county: "Mecklenburg",
-      address: "123 Main",
-      sources: ["zillow"],
+      county: "Wake",
+      address: "love",
+      sources: ["tax_records"],
     });
 
     const res = await POST(req);
     const json = await res.json();
 
     expect(res.status).toBe(200);
+    expect(json.warnings.join(" ").toLowerCase()).toContain("error");
     expect(json.results).toEqual([]);
-    expect(json.warnings.join(" ").toLowerCase()).toContain("zillow");
   });
 
   it("returns 401 when requireOrgId throws Unauthorized", async () => {
     const { requireOrgId } = await import("@/lib/apiHelpers");
     vi.mocked(requireOrgId).mockRejectedValueOnce(new Error("Unauthorized"));
 
-    global.fetch = mockFetchWithHtml(zillowSampleHtml) as unknown as typeof fetch;
-
     const req = makeRequest({
-      county: "Mecklenburg",
-      address: "123 Main",
+      county: "Wake",
+      address: "love",
       sources: ["county_gis"],
     });
 
