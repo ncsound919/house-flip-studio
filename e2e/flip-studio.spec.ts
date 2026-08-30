@@ -47,7 +47,14 @@ async function cleanup() {
 
 // The profile trigger assigns every new user to the same (first) org, so test
 // runs share one org. Wipe all app tables before a run for a clean slate.
+//
+// This is DESTRUCTIVE. Only runs when E2E_WIPE_ALLOWED=1 so the full suite can
+// never accidentally erase real data on a shared/hosted project.
 async function wipeOrgData() {
+  if (process.env.E2E_WIPE_ALLOWED !== "1") {
+    console.warn("E2E_WIPE_ALLOWED != 1 — skipping data wipe; tests expect a clean org.");
+    return;
+  }
   const headers = { apikey: supabase.serviceRole, Authorization: `Bearer ${supabase.serviceRole}`, "Content-Type": "application/json" };
   for (const table of ["change_orders", "deal_comments", "documents", "rehab_items", "underwriting", "contractors", "property_data", "comps", "ai_analyses", "deals"]) {
     try {

@@ -1,6 +1,15 @@
 # Supabase Setup Guide — NC House Flip Studio
 
-This project uses Supabase (Postgres + Auth + Realtime) for its database and auth layer. Follow these steps once to connect your project.
+This project uses Supabase (Postgres + Auth + Realtime) for its database and auth layer.
+
+> **Status: configured.** The hosted project already exists and migrations are applied:
+>
+> - Project ref: `ngapchaxevbrfhfyscgx`
+> - Region: East US (North Virginia), Free tier
+> - Dashboard: https://supabase.com/dashboard/project/ngapchaxevbrfhfyscgx
+> - Local `.env.local` points at this project (URL + anon + service_role keys).
+>
+> This guide documents how to reproduce that setup on a fresh project.
 
 ## 1. Create a Supabase project
 
@@ -11,10 +20,11 @@ This project uses Supabase (Postgres + Auth + Realtime) for its database and aut
 
 ## 2. Run the migrations
 
-The schema lives in `supabase/migrations/`. There are two files, run in order:
+The schema lives in `supabase/migrations/`. There are three files, run in order:
 
 1. `001_initial_schema.sql` — creates all tables, enums, and the profile trigger
 2. `002_rls_policies.sql` — enables RLS and adds row-level security policies
+3. `003_realtime_publication.sql` — adds tables to the realtime publication (required for Kanban live updates)
 
 ### Option A — SQL Editor (recommended for manual setup)
 
