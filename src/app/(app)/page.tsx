@@ -1,5 +1,5 @@
-import KanbanBoard from "@/components/kanban/KanbanBoard";
+import CommandCenter from "@/components/command/CommandCenter";
 
 export default function HomePage() {
-  return <KanbanBoard />;
+  return <CommandCenter />;
 }

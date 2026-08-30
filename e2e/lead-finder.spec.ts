@@ -88,8 +88,8 @@ test.describe.serial("Lead Finder", () => {
     await signIn(page, email, password);
 
     // Navbar link exists (Task 9 step 1)
-    await expect(page.getByRole("link", { name: "Leads" })).toBeVisible();
-    await page.getByRole("link", { name: "Leads" }).click();
+    await expect(page.getByRole("link", { name: "Leads", exact: true })).toBeVisible();
+    await page.getByRole("link", { name: "Leads", exact: true }).click();
     await page.waitForURL("**/leads");
     await expect(page.getByRole("heading", { name: "Lead Finder" })).toBeVisible();
 
@@ -160,9 +160,9 @@ test.describe.serial("Lead Finder", () => {
 
     await expect(page.getByText(`Added ${leadAddress} to pipeline`)).toBeVisible({ timeout: 10000 });
 
-    // Deal appears on Kanban home
-    await page.goto("/");
-    await page.waitForURL("**/");
+    // Deal appears on the Kanban board
+    await page.goto("/board");
+    await page.waitForURL("**/board");
     await expect(page.getByText(leadAddress).first()).toBeVisible({ timeout: 15000 });
   });
 

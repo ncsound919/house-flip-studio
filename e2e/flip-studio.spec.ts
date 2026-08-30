@@ -88,11 +88,14 @@ test.describe.serial("NC House Flip Studio E2E", () => {
     await page.getByLabel("Password").fill(password);
     await page.getByRole("button", { name: "Sign in" }).click();
     await page.waitForURL("**/");
+    // Home is the command center; board tests go to the Kanban explicitly.
+    await page.goto("/board");
   }
 
-  test("1. Partner A can sign in and land on an empty pipeline", async ({ page }) => {
+  test("1. Partner A can sign in and land on the command center", async ({ page }) => {
     await signIn(page, partnerA, "testpass123");
-    await expect(page.getByRole("heading", { name: "Pipeline" })).toBeVisible();
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Here's what's happening" })).toBeVisible();
   });
 
   test("2. Create a deal via the Add Deal modal", async ({ page }) => {
@@ -150,7 +153,7 @@ test.describe.serial("NC House Flip Studio E2E", () => {
     await expect(page.getByText("Bob the Electrician")).toBeVisible();
 
     // Link to rehab item
-    await page.goto("/");
+    await page.goto("/board");
     await page.getByText("123 Test Street").click();
     await page.waitForURL("**/deals/**");
     const dealUrl = page.url();
