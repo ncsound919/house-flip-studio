@@ -19,6 +19,16 @@ export interface ListingCard {
     buildingValue?: number;
     acreage?: number;
     lastSaleDate?: string;
+    mailingAddress?: string;
+    mailingState?: string;
+  };
+  motivation?: {
+    absenteeOwner: boolean;
+    outOfStateOwner: boolean;
+    longHeld: boolean;
+    olderHome: boolean;
+    reasonCount: number;
+    reasons: string[];
   };
 }
 export interface ListingSource {

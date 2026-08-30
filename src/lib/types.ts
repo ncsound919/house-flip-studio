@@ -28,6 +28,10 @@ export interface Deal {
   baths: number | null;
   year_built: number | null;
   lot_size: string | null;
+  assessed_value: number | null;
+  arv_estimate: number | null;
+  arv_method: string | null;
+  arv_estimate_at: string | null;
   created_by: string | null;
   created_at: string;
 }
