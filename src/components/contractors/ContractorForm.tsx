@@ -19,6 +19,7 @@ export interface Contractor {
   w9_on_file: boolean;
   notes: string | null;
   status: "active" | "available" | "completed";
+  verified_at?: string | null;
   created_at?: string;
 }
 
