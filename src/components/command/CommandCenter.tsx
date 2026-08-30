@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Search, AlertTriangle, Zap, ArrowRight, RefreshCw, Home } from "lucide-react";
+import AgentPane from "@/components/agent/AgentPane";
 
 interface DashboardData {
   counts: {
@@ -334,6 +335,9 @@ export default function CommandCenter() {
           ))}
         </div>
       </div>
+
+      {/* Autonomous agent operator pane */}
+      <AgentPane />
     </div>
   );
 }
