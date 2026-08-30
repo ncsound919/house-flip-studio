@@ -16,7 +16,6 @@
 # next.js
 /.next/
 /out/
-
 # production
 /build
 
@@ -42,3 +41,12 @@ next-env.d.ts
 
 # local backups / archives of old prototypes
 .archive/
+
+# playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
+# local dev logs
+dev-server.log

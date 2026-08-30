@@ -101,7 +101,8 @@ create table if not exists public.underwriting (
   cash_on_cash numeric,
   down_payment_amount numeric,
   loan_amount numeric,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  unique (deal_id)
 );
 
 -- Contractors

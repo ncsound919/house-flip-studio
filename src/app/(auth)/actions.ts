@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { createClient } from "@/src/lib/supabase/server";
+import { createClient } from "@/lib/supabase/server";
 
 export async function login(formData: FormData) {
   const supabase = await createClient();
@@ -12,7 +12,7 @@ export async function login(formData: FormData) {
 
   const { error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) {
-    return { error: error.message };
+    redirect(`/login?error=${encodeURIComponent(error.message)}`);
   }
 
   revalidatePath("/", "layout");
@@ -34,7 +34,7 @@ export async function signup(formData: FormData) {
     },
   });
   if (error) {
-    return { error: error.message };
+    redirect(`/signup?error=${encodeURIComponent(error.message)}`);
   }
 
   redirect("/login?check=email");

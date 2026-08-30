@@ -1,6 +1,6 @@
-"use client";
+﻿"use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   type ChangeOrder,
   type Contractor,
@@ -61,7 +61,6 @@ export default function RehabBudget({
   orgId: string;
   contractors: Contractor[];
 }) {
-  void orgId;
   const [items, setItems] = useState<RehabItem[]>([]);
   const [changeOrders, setChangeOrders] = useState<Record<string, ChangeOrder[]>>({});
   const [loading, setLoading] = useState(true);
@@ -72,7 +71,12 @@ export default function RehabBudget({
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // Guard against stale fetch responses: if a GET was issued before a POST
+  // committed, its empty result must not overwrite newer state.
+  const fetchSeq = useRef(0);
+
   const fetchItems = async () => {
+    const seq = ++fetchSeq.current;
     setLoading(true);
     setError(null);
     try {
@@ -84,16 +88,20 @@ export default function RehabBudget({
         throw new Error(data.error || "Failed to load line items");
       }
       const data = await res.json();
+      // Ignore stale responses that resolved out of order.
+      if (seq !== fetchSeq.current) return;
       setItems(data.items || []);
     } catch (e) {
+      if (seq !== fetchSeq.current) return;
       setError(e instanceof Error ? e.message : "Failed to load");
     } finally {
-      setLoading(false);
+      if (seq === fetchSeq.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     if (dealId) fetchItems();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dealId]);
 
   const fetchChangeOrders = async (itemId: string) => {
@@ -140,10 +148,8 @@ export default function RehabBudget({
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "Failed to add item");
       }
-      const data = await res.json();
-      setItems((prev) =>
-        prev.map((i) => (i.id === optimistic.id ? (data.item as RehabItem) : i))
-      );
+      // Server is the source of truth — refetch instead of patching state.
+      await fetchItems();
     } catch (e) {
       setItems((prev) => prev.filter((i) => i.id !== optimistic.id));
       setError(e instanceof Error ? e.message : "Failed to add item");
@@ -324,6 +330,7 @@ export default function RehabBudget({
     };
   }, [items]);
 
+  
   const progressPct = totals.est > 0 ? Math.min(100, (totals.act / totals.est) * 100) : 0;
   const overBudget = totals.est > 0 && totals.act > totals.est;
 
@@ -368,10 +375,9 @@ export default function RehabBudget({
         ) : null}
       </div>
 
-      {loading ? (
-        <p className="py-8 text-center text-sm text-zinc-500">Loading…</p>
-      ) : items.length === 0 ? (
-        <p className="rounded-xl border border-dashed border-zinc-300 py-10 text-center text-sm text-zinc-500">
+            {loading ? (
+        <p className="py-8 text-center text-sm text-zinc-500">Loadingâ€¦</p>
+      ) : items.length === 0 ? (        <p className="rounded-xl border border-dashed border-zinc-300 py-10 text-center text-sm text-zinc-500">
           No line items yet. Add your first line item to start tracking the rehab budget.
         </p>
       ) : (
@@ -401,9 +407,8 @@ export default function RehabBudget({
                   );
 
                   return (
-                    <>
+                    <Fragment key={item.id}>
                       <tr
-                        key={item.id}
                         className="border-b border-zinc-100 align-top hover:bg-zinc-50"
                       >
                         <td className="py-3 pr-2 text-zinc-900">{item.trade}</td>
@@ -414,7 +419,7 @@ export default function RehabBudget({
                           ) : null}
                         </td>
                         <td className="py-3 pr-2 text-zinc-700">
-                          {item.contractors?.name || "—"}
+                          {item.contractors?.name || "â€”"}
                         </td>
                         <td className="py-3 pr-2 text-right tabular-nums text-zinc-900">
                           {fmt(item.estimated_cost)}
@@ -510,7 +515,7 @@ export default function RehabBudget({
                           </td>
                         </tr>
                       ) : null}
-                    </>
+                    </Fragment>
                   );
                 })}
                 <tr className="bg-zinc-50 font-semibold text-zinc-900">
@@ -665,7 +670,7 @@ function ItemFormModal({
               onChange={(e) => setContractorId(e.target.value)}
               className="rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
             >
-              <option value="">— None —</option>
+              <option value="">â€” None â€”</option>
               {rankedContractors.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name} {c.trade ? `(${c.trade})` : ""}
@@ -800,7 +805,7 @@ function ChangeOrdersPanel({
     <div className="rounded-lg border border-zinc-200 bg-white p-3">
       <div className="mb-2 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-zinc-900">
-          Change Orders — {item.description}
+          Change Orders â€” {item.description}
         </h3>
         <span className="text-xs text-zinc-500">
           Approved impact: {fmt(cosTotal)}
