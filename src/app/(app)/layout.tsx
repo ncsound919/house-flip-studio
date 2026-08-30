@@ -5,6 +5,7 @@ import { signout } from "@/app/(auth)/actions";
 
 const navLinks = [
   { href: "/", label: "Deals" },
+  { href: "/leads", label: "Leads" },
   { href: "/contractors", label: "Contractors" },
   { href: "/documents", label: "Documents" },
 ];
