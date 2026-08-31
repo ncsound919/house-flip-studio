@@ -12,6 +12,8 @@ export interface Evaluation {
 export interface EvaluatedAction {
   kind: string;
   requiresApproval: boolean;
+  // advance_stage targets (Offer Made → an offer; Rehab → starting spend).
+  toStage?: string;
 }
 
 interface ActionContext {
@@ -33,7 +35,26 @@ export function evaluateAction(
   if (!action.requiresApproval) return { decision: "execute" };
 
   switch (action.kind) {
-    case "send_offer": {
+    case "send_offer":
+    case "advance_stage": {
+      // advance_stage → Offer Made is an offer; → Rehab is starting rehab spend.
+      if (action.kind === "advance_stage" && action.toStage === "Rehab") {
+        const l = limits.autoSpendRehab;
+        if (!l.enabled || l.monthlyCap <= 0) return { decision: "escalate" };
+        const amount = Number(ctx.amount) || 0;
+        if ((ctx.spendThisMonth ?? 0) + amount > l.monthlyCap) {
+          return { decision: "block", reason: `monthly spend would exceed cap $${l.monthlyCap.toLocaleString("en-US")}` };
+        }
+        return {
+          decision: "auto_approve",
+          rule: "autoSpendRehab",
+          evidence: `spend $${amount.toLocaleString("en-US")} within $${l.monthlyCap.toLocaleString("en-US")}`,
+        };
+      }
+      if (action.kind === "advance_stage" && action.toStage !== "Offer Made") {
+        // Under Contract / Listed / Closed advances stay operator-gated.
+        return { decision: "escalate" };
+      }
       const l = limits.autoSendOffers;
       if (!l.enabled || l.maxOfferAmount <= 0) return { decision: "escalate" };
       const amount = Number(ctx.amount) || 0;

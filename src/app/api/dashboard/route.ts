@@ -122,7 +122,13 @@ export async function GET() {
 
     // --- Business pulse KPIs (deterministic, no LLM) ---
     const dealIds = dealList.map((d) => d.id);
-    const [{ data: uws }, { data: lastRun }, { count: pendingCount }] = await Promise.all([
+    const [
+      { data: uws },
+      { data: lastRun },
+      { count: pendingCount },
+      { count: autoApprovedCount },
+      { count: blockedCount },
+    ] = await Promise.all([
       dealIds.length > 0
         ? admin.from("underwriting").select("deal_id, arv, projected_profit").in("deal_id", dealIds)
         : Promise.resolve({ data: null, error: null }),
@@ -137,6 +143,16 @@ export async function GET() {
         .select("id", { count: "exact", head: true })
         .eq("org_id", orgId)
         .eq("status", "pending_approval"),
+      admin
+        .from("agent_actions")
+        .select("id", { count: "exact", head: true })
+        .eq("org_id", orgId)
+        .eq("status", "auto_approved"),
+      admin
+        .from("agent_actions")
+        .select("id", { count: "exact", head: true })
+        .eq("org_id", orgId)
+        .eq("status", "blocked"),
     ]);
 
     const openUws = (uws ?? []) as Array<{ deal_id: string; arv: number | null; projected_profit: number | null }>;
@@ -174,6 +190,8 @@ export async function GET() {
       tiers,
       avgStageDwell,
       moneyGatesAwaiting: pendingCount ?? 0,
+      autoApproved: autoApprovedCount ?? 0,
+      blockedCount: blockedCount ?? 0,
       lastAgentRun: run
         ? { status: run.status ?? "unknown", started_at: run.started_at ?? null }
         : null,

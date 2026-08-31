@@ -55,8 +55,8 @@ export default async function SettingsPage() {
           Flip profile &amp; autonomous agent
         </h2>
         <p className="mb-4 text-sm text-zinc-500">
-          Budget band, hunt scope, and underwriting assumptions the agent uses.
-          Saved per-org and read by the scheduled cycles.
+          Budget band, hunt scope, underwriting assumptions, and the autonomy guardrails
+          (auto-approval limits) the agent uses. Saved per-org and read by the scheduled cycles.
         </p>
         <FlipProfileForm />
       </div>

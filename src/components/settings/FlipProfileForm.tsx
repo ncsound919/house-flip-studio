@@ -21,11 +21,26 @@ interface SettingsData {
     enabled: boolean;
     huntOnCycle: boolean;
     maxHuntPerCycle: number;
+    limits: {
+      autoSendOffers: { enabled: boolean; maxOfferAmount: number; dailyCap: number };
+      autoSendRfq: { enabled: boolean; dailyCap: number };
+      autoSpendRehab: { enabled: boolean; monthlyCap: number };
+      autoChase: { enabled: boolean; dailyCap: number };
+      autoScheduleInspections: { enabled: boolean; maxPerDay: number };
+    };
   };
   llm: {
     generateScopes: boolean;
   };
 }
+
+const DEFAULT_LIMITS: SettingsData["agent"]["limits"] = {
+  autoSendOffers: { enabled: false, maxOfferAmount: 0, dailyCap: 0 },
+  autoSendRfq: { enabled: false, dailyCap: 0 },
+  autoSpendRehab: { enabled: false, monthlyCap: 0 },
+  autoChase: { enabled: false, dailyCap: 0 },
+  autoScheduleInspections: { enabled: false, maxPerDay: 0 },
+};
 
 const field =
   "w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none";
@@ -105,6 +120,10 @@ export default function FlipProfileForm() {
     set(next, path);
     setSettings(next as unknown as SettingsData);
   };
+
+  // Old settings rows predate agent.limits; the schema backfills defaults on
+  // load, but a stale client snapshot shouldn't crash the form either.
+  const limits = settings.agent.limits ?? DEFAULT_LIMITS;
 
   return (
     <div className="space-y-5">
@@ -272,6 +291,139 @@ export default function FlipProfileForm() {
               onChange={(e) => setNum(["agent", "maxHuntPerCycle"], e.target.value)}
             />
           </label>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-zinc-900">Autonomy guardrails</h3>
+        <p className="text-xs text-zinc-500">
+          Guardrails default to OFF. The agent auto-approves money actions ONLY within these
+          limits and escalates everything else. Every auto-approval is logged with the rule and
+          evidence.
+        </p>
+        <div className="mt-3 space-y-3">
+          <div className="rounded-lg border border-zinc-100 bg-zinc-50/60 p-3">
+            <label className="flex items-center gap-2 text-sm text-zinc-700">
+              <input
+                type="checkbox"
+                checked={limits.autoSendOffers.enabled}
+                onChange={(e) => setBool(["agent", "limits", "autoSendOffers", "enabled"], e.target.checked)}
+              />
+              Auto-approve offers (advance → Offer Made)
+            </label>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-xs font-medium text-zinc-600">Max offer amount ($)</span>
+                <input
+                  type="number"
+                  className={field}
+                  value={limits.autoSendOffers.maxOfferAmount}
+                  onChange={(e) => setNum(["agent", "limits", "autoSendOffers", "maxOfferAmount"], e.target.value)}
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium text-zinc-600">Daily cap (offers)</span>
+                <input
+                  type="number"
+                  className={field}
+                  value={limits.autoSendOffers.dailyCap}
+                  onChange={(e) => setNum(["agent", "limits", "autoSendOffers", "dailyCap"], e.target.value)}
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-zinc-100 bg-zinc-50/60 p-3">
+            <label className="flex items-center gap-2 text-sm text-zinc-700">
+              <input
+                type="checkbox"
+                checked={limits.autoSendRfq.enabled}
+                onChange={(e) => setBool(["agent", "limits", "autoSendRfq", "enabled"], e.target.checked)}
+              />
+              Auto-send RFQs to verified contractors
+            </label>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-xs font-medium text-zinc-600">Daily cap (RFQs)</span>
+                <input
+                  type="number"
+                  className={field}
+                  value={limits.autoSendRfq.dailyCap}
+                  onChange={(e) => setNum(["agent", "limits", "autoSendRfq", "dailyCap"], e.target.value)}
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-zinc-100 bg-zinc-50/60 p-3">
+            <label className="flex items-center gap-2 text-sm text-zinc-700">
+              <input
+                type="checkbox"
+                checked={limits.autoSpendRehab.enabled}
+                onChange={(e) => setBool(["agent", "limits", "autoSpendRehab", "enabled"], e.target.checked)}
+              />
+              Auto-approve rehab spend (payment draws)
+            </label>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-xs font-medium text-zinc-600">Monthly cap ($)</span>
+                <input
+                  type="number"
+                  className={field}
+                  value={limits.autoSpendRehab.monthlyCap}
+                  onChange={(e) => setNum(["agent", "limits", "autoSpendRehab", "monthlyCap"], e.target.value)}
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-zinc-100 bg-zinc-50/60 p-3">
+            <label className="flex items-center gap-2 text-sm text-zinc-700">
+              <input
+                type="checkbox"
+                checked={limits.autoChase.enabled}
+                onChange={(e) => setBool(["agent", "limits", "autoChase", "enabled"], e.target.checked)}
+              />
+              Auto-chase overdue documents
+            </label>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-xs font-medium text-zinc-600">Daily cap (chases)</span>
+                <input
+                  type="number"
+                  className={field}
+                  value={limits.autoChase.dailyCap}
+                  onChange={(e) => setNum(["agent", "limits", "autoChase", "dailyCap"], e.target.value)}
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-zinc-100 bg-zinc-50/60 p-3">
+            <label className="flex items-center gap-2 text-sm text-zinc-700">
+              <input
+                type="checkbox"
+                checked={limits.autoScheduleInspections.enabled}
+                onChange={(e) =>
+                  setBool(["agent", "limits", "autoScheduleInspections", "enabled"], e.target.checked)
+                }
+              />
+              Auto-schedule inspections
+            </label>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-xs font-medium text-zinc-600">Max per day</span>
+                <input
+                  type="number"
+                  className={field}
+                  value={limits.autoScheduleInspections.maxPerDay}
+                  onChange={(e) =>
+                    setNum(["agent", "limits", "autoScheduleInspections", "maxPerDay"], e.target.value)
+                  }
+                />
+              </label>
+            </div>
+          </div>
         </div>
       </div>
 

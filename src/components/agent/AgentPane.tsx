@@ -232,6 +232,10 @@ export default function AgentPane() {
               >
                 {a.status === "done" || a.status === "approved" ? (
                   <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                ) : a.status === "auto_approved" ? (
+                  <Zap className="mt-0.5 h-3.5 w-3.5 shrink-0 text-violet-500" />
+                ) : a.status === "blocked" ? (
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-500" />
                 ) : a.status === "failed" ? (
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-500" />
                 ) : (
@@ -239,6 +243,15 @@ export default function AgentPane() {
                 )}
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-xs font-medium text-zinc-700">{a.title}</p>
+                  {a.status === "auto_approved" ? (
+                    <span className="mt-0.5 inline-block rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700">
+                      AUTO-APPROVED {a.metadata?.guardrailRule ? `(limit: ${String(a.metadata.guardrailRule)})` : ""}
+                    </span>
+                  ) : a.status === "blocked" ? (
+                    <span className="mt-0.5 inline-block rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-700">
+                      BLOCKED BY LIMIT {a.metadata?.guardrailReason ? `— ${String(a.metadata.guardrailReason)}` : ""}
+                    </span>
+                  ) : null}
                   {a.deal_id ? (
                     <Link
                       href={`/deals/${a.deal_id}`}
