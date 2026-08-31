@@ -65,6 +65,8 @@ export interface AgentRunSummary {
   moneyGatesAwaiting: number;
   lastRunAt: string | null;
   lastRunStatus: string | null;
+  autoApproved?: number; // money actions guardrail-authorized
+  blockedCount?: number; // money actions blocked by limits
   // action_type → status → count (success/failure telemetry).
   byKindStatus?: Record<string, Record<string, number>>;
   topErrors?: { message: string; count: number }[];

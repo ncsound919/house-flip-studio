@@ -20,6 +20,8 @@ interface DashboardData {
     tiers: { hot: number; warm: number; cold: number };
     avgStageDwell: { stage: string; avgDays: number }[];
     moneyGatesAwaiting: number;
+    autoApproved?: number;
+    blockedCount?: number;
     lastAgentRun: { status: string; started_at: string | null } | null;
   };
   flags: string[];
@@ -261,6 +263,14 @@ export default function CommandCenter() {
             </p>
           </div>
         </div>
+        {(data?.kpis.autoApproved ?? 0) > 0 || (data?.kpis.blockedCount ?? 0) > 0 ? (
+          <p className="mt-3 rounded-lg bg-violet-50 px-3 py-2 text-xs text-violet-800">
+            Autonomy guardrails: <span className="font-semibold">{data?.kpis.autoApproved ?? 0} auto-approved</span>
+            <span className="mx-1.5 text-violet-300">·</span>
+            <span className="font-semibold">{data?.kpis.blockedCount ?? 0} blocked by limits</span>
+            — every auto-approval is logged with its rule and evidence in the Flip operator pane.
+          </p>
+        ) : null}
         {data && data.kpis.avgStageDwell.length > 0 ? (
           <div className="mt-3 flex flex-wrap gap-2">
             {data.kpis.avgStageDwell.map((s) => (
