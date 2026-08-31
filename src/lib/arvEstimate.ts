@@ -18,7 +18,7 @@ import { medianPricePerSqft } from "@/lib/leadScoring";
 export interface ArvEstimate {
   arv: number | null;
   source: "assessed_value" | "sqft_median" | "combined" | "comps" | "not_enough_data";
-  confidence: "low" | "medium" | null;
+  confidence: "low" | "medium" | "high" | null;
   disclaimer: string;
   inputs: { assessedValue?: number; sqft?: number; county: string; compCount?: number };
   signals: string[];
