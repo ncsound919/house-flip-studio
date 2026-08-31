@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { createAdminClient, requireOrgId } from "@/lib/apiHelpers";
 import { DEAL_STAGES, type Deal } from "@/lib/types";
+import { computeDealPnl } from "@/lib/finance/pnl";
+import {
+  computePortfolioMetrics,
+  type PortfolioDealPnl,
+} from "@/lib/finance/portfolio";
 
 // Command-center aggregation: what the app knows WITHOUT the user asking.
 // Returns auto-scored leads, red flags, and a deterministic "do this today"
@@ -124,7 +129,12 @@ export async function GET() {
     const dealIds = dealList.map((d) => d.id);
     const [{ data: uws }, { data: lastRun }, { count: pendingCount }] = await Promise.all([
       dealIds.length > 0
-        ? admin.from("underwriting").select("deal_id, arv, projected_profit").in("deal_id", dealIds)
+        ? admin
+            .from("underwriting")
+            .select(
+              "deal_id, arv, projected_profit, purchase_price, acquisition_costs, financing_costs, selling_costs"
+            )
+            .in("deal_id", dealIds)
         : Promise.resolve({ data: null, error: null }),
       admin
         .from("agent_runs")
@@ -179,6 +189,137 @@ export async function GET() {
         : null,
     };
 
+    // --- Finance KPIs (deterministic, labeled real vs projected) ---
+    // Realized P&L only from Closed deals with an actual sale price; everything
+    // else is projected from underwriting rows and labeled as such.
+    interface UnderwritingRow {
+      deal_id: string;
+      arv: number | null;
+      projected_profit: number | null;
+      purchase_price: number | null;
+      acquisition_costs: number | null;
+      financing_costs: number | null;
+      selling_costs: number | null;
+    }
+
+    const uwById = new Map<string, UnderwritingRow>();
+    for (const u of (uws ?? []) as UnderwritingRow[]) uwById.set(u.deal_id, u);
+
+    const rehabActualByDeal = new Map<string, number>();
+    for (const item of rehabItems ?? []) {
+      rehabActualByDeal.set(
+        item.deal_id,
+        (rehabActualByDeal.get(item.deal_id) ?? 0) + (Number(item.actual_cost) || 0)
+      );
+    }
+
+    const pnlFor = (d: Deal): PortfolioDealPnl => {
+      const uw = uwById.get(d.id);
+      const finalSalePrice = (d as Deal & { final_sale_price?: number | null }).final_sale_price;
+      const pnl = computeDealPnl({
+        stage: d.stage,
+        finalSalePrice: Number(finalSalePrice) > 0 ? Number(finalSalePrice) : null,
+        purchasePrice: uw?.purchase_price ?? null,
+        acquisitionCosts: uw?.acquisition_costs ?? null,
+        rehabActual: rehabActualByDeal.get(d.id) ?? null,
+        financingCosts: uw?.financing_costs ?? null,
+        sellingCosts: uw?.selling_costs ?? null,
+        projectedProfit: uw?.projected_profit ?? null,
+        projectedArv: uw?.arv ?? null,
+      });
+      return {
+        isRealized: pnl.isRealized,
+        realizedProfit: pnl.realizedProfit,
+        finalSalePrice: pnl.finalSalePrice,
+        projectedProfit: pnl.projectedProfit,
+      };
+    };
+
+    const pnls: Record<string, PortfolioDealPnl> = {};
+    for (const d of dealList) pnls[d.id] = pnlFor(d);
+
+    const finance = computePortfolioMetrics({
+      deals: dealList.map((d) => ({
+        id: d.id,
+        stage: d.stage,
+        createdAt: d.created_at,
+        stageChangedAt: d.stage_changed_at || d.created_at,
+      })),
+      pnls,
+    });
+
+    // ROI on invested capital — only over realized deals with a real cost basis.
+    let investedCapital = 0;
+    let realizedProfitOnCapital = 0;
+    for (const d of dealList) {
+      if (d.stage !== "Closed" || !pnls[d.id]?.isRealized) continue;
+      const purchase = Number(uwById.get(d.id)?.purchase_price);
+      if (!(purchase > 0)) continue;
+      investedCapital += purchase;
+      realizedProfitOnCapital += pnls[d.id].realizedProfit ?? 0;
+    }
+    const roi =
+      investedCapital > 0
+        ? Math.round((realizedProfitOnCapital / investedCapital) * 100)
+        : null;
+
+    // Cash flow: `in` = real closed sale prices, `out` = real payments ledger.
+    // The payments table is Phase 3 and does NOT exist in this branch — the query
+    // degrades to zero (never fabricating spend) and flags that it's unavailable.
+    let paymentsData: Array<{ deal_id: string | null; amount: number | null; created_at: string }> = [];
+    let paymentsUnavailable = false;
+    try {
+      const { data, error } = await admin
+        .from("payments")
+        .select("deal_id, amount, created_at")
+        .eq("org_id", orgId);
+      if (error) paymentsUnavailable = true;
+      else paymentsData = (data ?? []) as typeof paymentsData;
+    } catch {
+      paymentsUnavailable = true;
+    }
+
+    const monthKey = (iso: string) => (iso || "").slice(0, 7);
+    const cashFlowMap = new Map<string, { month: string; in: number; out: number }>();
+    for (const d of dealList) {
+      if (d.stage !== "Closed") continue;
+      const sale = Number((d as Deal & { final_sale_price?: number | null }).final_sale_price);
+      if (!(sale > 0)) continue;
+      const key = monthKey(d.stage_changed_at || d.created_at);
+      const bucket = cashFlowMap.get(key) ?? { month: key, in: 0, out: 0 };
+      bucket.in += sale;
+      cashFlowMap.set(key, bucket);
+    }
+    for (const p of paymentsData) {
+      const key = monthKey(p.created_at);
+      if (!key) continue;
+      const bucket = cashFlowMap.get(key) ?? { month: key, in: 0, out: 0 };
+      bucket.out += Number(p.amount) || 0;
+      cashFlowMap.set(key, bucket);
+    }
+    const cashFlow = [...cashFlowMap.values()].sort((a, b) => a.month.localeCompare(b.month));
+
+    // Hit rate: real offers sent → closed. This branch's planner records offers as
+    // advance_stage actions targeting "Offer Made"; no send_offer kind exists here.
+    let offersSent = 0;
+    try {
+      const { data, error } = await admin
+        .from("agent_actions")
+        .select("action_type, status, metadata")
+        .eq("org_id", orgId)
+        .eq("action_type", "advance_stage")
+        .in("status", ["done", "approved", "auto_approved"]);
+      if (!error) {
+        offersSent = (data ?? []).filter(
+          (a) => (a.metadata as { to?: string } | null)?.to === "Offer Made"
+        ).length;
+      }
+    } catch {
+      offersSent = 0;
+    }
+    const closedCount = dealList.filter((d) => d.stage === "Closed").length;
+    const hitRate = offersSent > 0 ? Math.round((closedCount / offersSent) * 100) : null;
+
     // 6. Red flag: money gates piling up unapproved.
     if ((pendingCount ?? 0) > 0) {
       flags.push(
@@ -203,6 +344,17 @@ export async function GET() {
         overdueDocs: (documents ?? []).filter((d) => d.status === "missing" || d.status === "requested").length,
       },
       kpis,
+      finance: {
+        realizedProfit: finance.realizedProfit,
+        realizedCount: finance.realizedCount,
+        pipelineValue: finance.pipelineValue,
+        averageCycleDays: finance.averageCycleDays,
+        openDealCount: finance.openDealCount,
+        roi,
+      },
+      cashFlow,
+      hitRate: { rate: hitRate, sampleSize: offersSent, closed: closedCount },
+      paymentsUnavailable,
       flags: flags.slice(0, 15),
       actions: actions.slice(0, 10),
       topLeads,
