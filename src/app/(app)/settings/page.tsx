@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Download, Database, Cpu, SlidersHorizontal } from "lucide-react";
+import { Download, Database, Cpu, SlidersHorizontal, Search } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import SettingsForm from "@/components/settings/SettingsForm";
@@ -26,6 +26,7 @@ export default async function SettingsPage() {
     process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
   );
   const hasOpenRouter = Boolean(process.env.OPENROUTER_API_KEY);
+  const hasRentcast = Boolean(process.env.RENTCAST_API_KEY);
   const llmModel = process.env.OPENROUTER_MODEL || "google/gemini-2.0-flash-exp";
 
   return (
@@ -109,6 +110,24 @@ export default async function SettingsPage() {
               }`}
             >
               {hasOpenRouter ? "Connected" : "Not configured"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between rounded-lg bg-zinc-50 p-3">
+            <div className="flex items-center gap-3">
+              <Search className="h-5 w-5 text-zinc-400" />
+              <div>
+                <p className="text-sm font-medium text-zinc-800">Rentcast (research)</p>
+                <p className="text-xs text-zinc-500">
+                  Owner/occupancy data for deal dossiers. Dossiers still compile without it.
+                </p>
+              </div>
+            </div>
+            <span
+              className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                hasRentcast ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"
+              }`}
+            >
+              {hasRentcast ? "Connected" : "Not configured"}
             </span>
           </div>
         </div>

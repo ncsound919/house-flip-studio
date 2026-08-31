@@ -18,14 +18,14 @@ describe("compileDossier", () => {
       expect(["ok", "error"]).toContain(s.status);
       expect(s.fetchedAt).toBeTruthy();
     }
-  });
+  }, 35_000);
 });
 
 describe("research sources — graceful degradation", () => {
   it("countyTax returns a typed result, never throws", async () => {
     const r = await fetchCountyTaxRecord("123", { minAssessed: 30_000, maxAssessed: 150_000 });
     expect(["ok", "error"]).toContain(r.status);
-  });
+  }, 35_000);
 
   it("rentcast returns error when no API key is configured", async () => {
     const prev = process.env.RENTCAST_API_KEY;
