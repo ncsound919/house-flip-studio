@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { huntLeads, scoreListings } from "../lib/leadHunt";
 import { fetchCountyParcels, mapParcel } from "../lib/listingSources/countyParcels";
+import { scoreAndTier } from "../lib/leadTier";
+import type { ListingCard } from "../lib/listingSources/types";
 import * as apiHelpers from "../lib/apiHelpers";
 
 // NC OneMap statewide parcel JSON structure.
@@ -260,5 +262,19 @@ describe("scoreListings", () => {
     expect(scored[0].score.attentionScore).toBeGreaterThan(50);
     expect(scored[0].score.needsArv).toBe(true);
     expect(scored[0].score.flags.length).toBeGreaterThan(0);
+  });
+});
+
+describe("leadHunt — new signal notes", () => {
+  it("tier notes include new signals via reasons", () => {
+    const card: ListingCard = {
+      address: "5 Oak St", county: "Wake", source: "county_gis", source_label: "nc_onemap_parcel",
+      parcel: { assessedValue: 90_000, pin: "55" },
+      motivation: { absenteeOwner: false, outOfStateOwner: false, longHeld: false, olderHome: true, multiParcelOwner: true, taxDelinquent: true, reasonCount: 2, reasons: ["Multi-parcel owner (portfolio)", "Tax delinquent"] },
+    };
+    const { score, tier } = scoreAndTier(card);
+    expect(score.flags.join(" ")).toMatch(/Multi-parcel/);
+    expect(score.flags.join(" ")).toMatch(/tax delinquent/i);
+    expect(tier).toBeDefined();
   });
 });
