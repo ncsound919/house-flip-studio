@@ -21,12 +21,26 @@ export type AgentActionKind =
   | "chase_document" // emailed/marked a follow-up (non-money)
   | "draft_rfq" // drafted RFQ (non-money, no send)
   | "verify_contractor" // license verification (non-money)
+  | "fetch_dossier" // research dossier for hot/warm lead (non-money)
+  | "fetch_comps" // real comps for a deal (non-money)
+  | "schedule_inspection" // propose/auto-schedule inspection
+  | "record_payment" // rehab spend draw (non-money ledger entry)
+  | "approve_payment" // MONEY GATE — draw approval
+  | "recommend_list_price" // comps-based list price recommendation (non-money)
+  | "predict_exit" // timeline + proceeds vs carrying costs (non-money)
   | "send_rfq" // MONEY GATE — requires approval
   | "send_offer" // MONEY GATE — requires approval
   | "start_rehab" // MONEY GATE — requires approval
   | "info"; // diagnostic / skipped / blocked
 
-export type AgentActionStatus = "done" | "skipped" | "blocked" | "failed" | "pending_approval" | "approved";
+export type AgentActionStatus =
+  | "done"
+  | "skipped"
+  | "blocked"
+  | "failed"
+  | "pending_approval"
+  | "approved"
+  | "auto_approved"; // guardrail-authorized within limits
 
 export interface AgentAction {
   id: string;
