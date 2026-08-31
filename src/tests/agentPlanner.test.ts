@@ -419,7 +419,7 @@ describe("planAgentActions — Phase 3 kinds", () => {
       state({
         deals: [deal({ stage: "Rehab" })],
         rehabItems: [{ id: "r1", deal_id: "d1", trade: "Roofing", status: "contracted" }],
-        payments: { d1: [{ rehab_item_id: "r1", status: "recorded", amount: 5_000 }] },
+        payments: { d1: [{ id: "p1", rehab_item_id: "r1", status: "recorded", amount: 5_000 }] },
       })
     );
     expect(plan.some((p) => p.kind === "record_payment")).toBe(false);
@@ -429,12 +429,13 @@ describe("planAgentActions — Phase 3 kinds", () => {
     const plan = planAgentActions(
       state({
         deals: [deal({ stage: "Rehab" })],
-        payments: { d1: [{ rehab_item_id: "r1", status: "recorded", amount: 5_000 }] },
+        payments: { d1: [{ id: "p1", rehab_item_id: "r1", status: "recorded", amount: 5_000 }] },
       })
     );
     const ap = plan.find((p) => p.kind === "approve_payment");
     expect(ap).toBeDefined();
     expect(ap!.requires_approval).toBe(true);
     expect(ap!.metadata.amount).toBe(5_000);
+    expect(ap!.metadata.payment_id).toBe("p1");
   });
 });

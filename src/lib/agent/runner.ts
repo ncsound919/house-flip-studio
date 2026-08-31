@@ -8,6 +8,7 @@ import { verifyContractor } from "@/lib/contractorVerification";
 import { buildDeterministicRfq } from "@/lib/rfqBuilder";
 import { generateScopeForDeal } from "@/lib/agent/scope";
 import { evaluateAction } from "@/lib/guardrails/evaluate";
+import { enqueueJob, hasPendingJob } from "./queue";
 import {
   planAgentActions,
   type PlannedAction,
@@ -327,6 +328,18 @@ async function executeStep(
       return await applyGenerateScope(admin, runId, orgId, step, policy.settings);
     case "draft_rfq":
       return await applyDraftRfq(admin, runId, orgId, step);
+    case "fetch_dossier":
+      return await applyFetchDossier(admin, runId, orgId, step);
+    case "schedule_inspection":
+      return await applyScheduleInspection(admin, runId, orgId, step, policy.settings.agent.limits);
+    case "record_payment":
+      return await applyRecordPayment(admin, runId, orgId, step);
+    case "approve_payment":
+      return await applyApprovePayment(admin, runId, orgId, step);
+    case "recommend_list_price":
+      return await applyRecommendListPrice(admin, runId, orgId, step);
+    case "predict_exit":
+      return await applyPredictExit(admin, runId, orgId, step);
     case "send_rfq":
     case "send_offer":
     case "start_rehab":
@@ -507,13 +520,35 @@ async function executeMoneyAction(
   }
 }
 
-// Placeholder for Task 5's draw-approval mutator — keeps the guardrail routing
-// stable until the full applyApprovePayment handler lands.
+// Core draw-approval mutator shared by the guardrail auto-approve path and the
+// operator approval path (approveAgentAction). Never records — callers own the
+// audit log entry.
 async function mutateApprovePayment(
-  _admin: ReturnType<typeof createAdminClient>,
-  _step: PlannedAction
+  admin: ReturnType<typeof createAdminClient>,
+  step: PlannedAction
 ): Promise<{ status: AgentActionStatus; reason?: string }> {
-  return { status: "skipped", reason: "approve_payment mutator lands in Task 5" };
+  const paymentId = step.metadata.payment_id as string | undefined;
+  if (!paymentId) return { status: "skipped", reason: "no payment_id" };
+  const { error } = await admin
+    .from("payments")
+    .update({ status: "approved", approved_at: new Date().toISOString() })
+    .eq("id", paymentId);
+  if (error) return { status: "failed", reason: error.message };
+  return { status: "done" };
+}
+
+// Explicit-authorization handler (falls through only when the caller passed
+// executeMoneyActions): same world-state as the guardrail path.
+async function applyApprovePayment(
+  admin: ReturnType<typeof createAdminClient>,
+  runId: string,
+  orgId: string,
+  step: PlannedAction
+): ExecResult {
+  const result = await mutateApprovePayment(admin, step);
+  if (result.status !== "done") return result;
+  await recordAction(admin, runId, orgId, step, "done", { approved: true });
+  return result;
 }
 
 async function applyGenerateDocument(
@@ -714,6 +749,143 @@ async function applyGenerateScope(
   return { status: "done" };
 }
 
+async function applyFetchDossier(
+  admin: ReturnType<typeof createAdminClient>,
+  runId: string,
+  orgId: string,
+  step: PlannedAction
+): ExecResult {
+  if (!step.dealId) return { status: "skipped", reason: "no dealId" };
+  // Dedup against the queue: never stack a second dossier job for the same deal.
+  if (await hasPendingJob(orgId, "fetch_dossier", step.dealId)) {
+    await recordAction(admin, runId, orgId, step, "skipped", { reason: "dossier job already pending" });
+    return { status: "skipped", reason: "dossier job already pending" };
+  }
+  const queued = await enqueueJob(orgId, "fetch_dossier", step.dealId, {
+    address: String(step.metadata.address ?? ""),
+    pin: step.metadata.pin ? String(step.metadata.pin) : undefined,
+  });
+  if (!queued.ok) {
+    await recordAction(admin, runId, orgId, step, "failed", { error: queued.reason });
+    return { status: "failed", reason: queued.reason };
+  }
+  await recordAction(admin, runId, orgId, step, "done", { queued: true, jobKind: "fetch_dossier" });
+  return { status: "done" };
+}
+
+async function applyScheduleInspection(
+  admin: ReturnType<typeof createAdminClient>,
+  runId: string,
+  orgId: string,
+  step: PlannedAction,
+  limits: OrgSettings["agent"]["limits"]
+): ExecResult {
+  if (!step.dealId) return { status: "skipped", reason: "no dealId" };
+  const windowDays = Number(step.metadata.windowDays) || 7;
+  const l = limits.autoScheduleInspections;
+  const auto = l.enabled && l.maxPerDay > 0;
+  // HONESTY: nothing is actually scheduled here — a real inspection only happens
+  // via the operator. This records the proposal + whether guardrails would have
+  // auto-scheduled it. No fabricated appointments.
+  await recordAction(admin, runId, orgId, step, "done", {
+    proposedFrom: new Date().toISOString().slice(0, 10),
+    proposedTo: new Date(Date.now() + windowDays * 86_400_000).toISOString().slice(0, 10),
+    auto,
+    requiresOperator: !auto,
+  });
+  return { status: "done" };
+}
+
+async function applyRecordPayment(
+  admin: ReturnType<typeof createAdminClient>,
+  runId: string,
+  orgId: string,
+  step: PlannedAction
+): ExecResult {
+  if (!step.dealId) return { status: "skipped", reason: "no dealId" };
+  const itemId = step.metadata.rehab_item_id as string | undefined;
+  if (!itemId) return { status: "skipped", reason: "no rehab_item_id" };
+  const { data: item } = await admin
+    .from("rehab_items")
+    .select("estimated_cost, actual_cost")
+    .eq("id", itemId)
+    .single();
+  const itemRow = item as { estimated_cost?: number | null; actual_cost?: number | null } | null;
+  const amount = Number(itemRow?.actual_cost) || Number(itemRow?.estimated_cost) || 0;
+  const { error } = await admin.from("payments").insert({
+    org_id: orgId,
+    deal_id: step.dealId,
+    rehab_item_id: itemId,
+    amount,
+    status: "recorded",
+  });
+  if (error) return { status: "failed", reason: error.message };
+  await recordAction(admin, runId, orgId, step, "done", { rehab_item_id: itemId, amount });
+  return { status: "done" };
+}
+
+async function applyRecommendListPrice(
+  admin: ReturnType<typeof createAdminClient>,
+  runId: string,
+  orgId: string,
+  step: PlannedAction
+): ExecResult {
+  if (!step.dealId) return { status: "skipped", reason: "no dealId" };
+  const [{ data: deal }, { data: comps }] = await Promise.all([
+    admin.from("deals").select("arv_estimate").eq("id", step.dealId).single(),
+    admin.from("comps").select("sale_price").eq("deal_id", step.dealId),
+  ]);
+  const arv = Number((deal as { arv_estimate?: number | null } | null)?.arv_estimate) || 0;
+  const prices = ((comps ?? []) as Array<{ sale_price?: number | null }>)
+    .map((c) => Number(c.sale_price))
+    .filter((n: number) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b);
+  let listPrice: number;
+  let source: string;
+  if (prices.length > 0) {
+    const median = prices[Math.floor(prices.length / 2)];
+    listPrice = Math.max(arv, Math.round(median * 1.02));
+    source = `max(arv, comps median ${median.toLocaleString("en-US")} × 1.02)`;
+  } else {
+    listPrice = arv;
+    source = "arv (no comps on file)";
+  }
+  await recordAction(admin, runId, orgId, step, "done", { listPrice, source });
+  return { status: "done" };
+}
+
+async function applyPredictExit(
+  admin: ReturnType<typeof createAdminClient>,
+  runId: string,
+  orgId: string,
+  step: PlannedAction
+): ExecResult {
+  if (!step.dealId) return { status: "skipped", reason: "no dealId" };
+  const [{ data: deal }, { data: uwRows }] = await Promise.all([
+    admin.from("deals").select("stage, stage_changed_at, arv_estimate").eq("id", step.dealId).single(),
+    admin.from("underwriting").select("total_project_cost, arv").eq("deal_id", step.dealId).limit(1),
+  ]);
+  const dealRow = deal as { stage?: string; stage_changed_at?: string; arv_estimate?: number | null } | null;
+  const uwRow = ((uwRows ?? []) as Array<{ total_project_cost?: number | null; arv?: number | null }>)[0];
+  const arv =
+    Number(dealRow?.arv_estimate) || Number(uwRow?.arv) || 0;
+  const totalProjectCost = Number(uwRow?.total_project_cost) || 0;
+  const stageIdx = dealRow?.stage ? DEAL_STAGES.indexOf(dealRow.stage as (typeof DEAL_STAGES)[number]) : -1;
+  const remainingStages = stageIdx >= 0 ? Math.max(0, DEAL_STAGES.length - 1 - stageIdx) : 0;
+  const dwell = dealRow?.stage_changed_at
+    ? Math.max(0, Math.floor((Date.now() - new Date(dealRow.stage_changed_at).getTime()) / 86_400_000))
+    : 0;
+  const timelineDays = dwell + remainingStages * 30;
+  const projectedProceeds = arv - totalProjectCost;
+  await recordAction(admin, runId, orgId, step, "done", {
+    timelineDays,
+    projectedProceeds,
+    remainingStages,
+    projected: true,
+  });
+  return { status: "done" };
+}
+
 // --- Audit log ---------------------------------------------------------------
 
 async function recordAction(
@@ -783,7 +955,7 @@ async function loadPlannerState(
         .eq("action_type", "chase_document")
         .gte("created_at", new Date(Date.now() - 7 * 86_400_000).toISOString()),
       admin.from("dossiers").select("deal_id").eq("org_id", orgId),
-      admin.from("payments").select("deal_id, rehab_item_id, amount, status").eq("org_id", orgId),
+      admin.from("payments").select("id, deal_id, rehab_item_id, amount, status").eq("org_id", orgId),
     ]);
 
   const underwritings: PlannerState["underwritings"] = {};
@@ -833,6 +1005,7 @@ async function loadPlannerState(
 
   const paymentsByDeal: PlannerState["payments"] = {};
   for (const p of (paymentRows ?? []) as Array<{
+    id: string;
     deal_id: string;
     rehab_item_id: string | null;
     amount: number | null;
@@ -840,6 +1013,7 @@ async function loadPlannerState(
   }>) {
     if (!paymentsByDeal[p.deal_id]) paymentsByDeal[p.deal_id] = [];
     paymentsByDeal[p.deal_id].push({
+      id: p.id,
       rehab_item_id: p.rehab_item_id ?? "",
       status: p.status,
       amount: p.amount,
@@ -975,6 +1149,16 @@ export async function approveAgentAction(actionId: string, orgId: string): Promi
       .update({ stage: to, stage_changed_at: new Date().toISOString() })
       .eq("id", a.deal_id);
     if (upErr) return { ok: false, reason: upErr.message };
+  }
+
+  if (a.action_type === "approve_payment") {
+    const paymentId = a.metadata?.payment_id as string | undefined;
+    if (!paymentId) return { ok: false, reason: "missing payment_id" };
+    const { error: payErr } = await admin
+      .from("payments")
+      .update({ status: "approved", approved_at: new Date().toISOString() })
+      .eq("id", paymentId);
+    if (payErr) return { ok: false, reason: payErr.message };
   }
 
   await admin

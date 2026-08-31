@@ -80,6 +80,7 @@ export interface PlannerRecentChase {
 }
 
 export interface PlannerPayment {
+  id: string;
   rehab_item_id: string;
   status: string; // 'recorded' | 'approved' | 'paid'
   amount: number | null;
@@ -386,7 +387,7 @@ function planForRehab(deal: PlannerDeal, state: PlannerState, out: PlannedAction
       title: `Approve payment draw on ${deal.address}`,
       detail: "MONEY GATE — a recorded rehab draw awaits approval before funds move.",
       requires_approval: true,
-      metadata: { rehab_item_id: p.rehab_item_id, amount: p.amount, deal_id: deal.id },
+      metadata: { payment_id: p.id, rehab_item_id: p.rehab_item_id, amount: p.amount, deal_id: deal.id },
     });
   }
 

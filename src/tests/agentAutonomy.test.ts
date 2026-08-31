@@ -474,3 +474,173 @@ describe("runner — guardrails live", () => {
     expect(result.moneyGatesAwaiting).toBe(0);
   });
 });
+
+describe("runner — Phase 3 handlers", () => {
+  const baseDeal = {
+    id: "d1",
+    org_id: "org1",
+    address: "1 Main St",
+    city: "Charlotte",
+    asking_price: null,
+    sqft: 1200,
+    year_built: 1970,
+    assessed_value: null,
+    arv_estimate: 250_000,
+    arv_method: "sqft_median",
+  };
+
+  it("fetch_dossier enqueues a job and records done", async () => {
+    const store: Store = {
+      org_settings: [{ org_id: "org1", data: { agent: { huntOnCycle: false } } }],
+      deals: [
+        {
+          ...baseDeal,
+          stage: "Lead",
+          assessed_value: null,
+          sqft: null,
+          arv_estimate: null,
+          arv_method: null,
+        },
+      ],
+    };
+    mockAdmin(store);
+
+    await runAgentCycle({ orgId: "org1", trigger: "manual" });
+
+    const fd = store.agent_actions?.find(
+      (a) => a.action_type === "fetch_dossier" && a.status === "done"
+    );
+    expect(fd).toBeDefined();
+    expect((fd?.metadata as Record<string, unknown>).queued).toBe(true);
+    expect(
+      store.agent_jobs?.some((j) => j.kind === "fetch_dossier" && j.deal_id === "d1" && j.status === "pending")
+    ).toBe(true);
+  });
+
+  it("schedule_inspection records a proposal (auto=false by default)", async () => {
+    const store: Store = {
+      org_settings: [{ org_id: "org1", data: { agent: { huntOnCycle: false } } }],
+      deals: [{ ...baseDeal, stage: "Inspecting", assessed_value: 90_000 }],
+      rehab_items: [{ id: "r1", org_id: "org1", deal_id: "d1", trade: "Roofing", status: "estimated" }],
+    };
+    mockAdmin(store);
+
+    await runAgentCycle({ orgId: "org1", trigger: "manual" });
+
+    const si = store.agent_actions?.find(
+      (a) => a.action_type === "schedule_inspection" && a.status === "done"
+    );
+    expect(si).toBeDefined();
+    expect((si?.metadata as Record<string, unknown>).auto).toBe(false);
+    expect((si?.metadata as Record<string, unknown>).requiresOperator).toBe(true);
+  });
+
+  it("record_payment inserts a recorded draw from the item cost", async () => {
+    const store: Store = {
+      org_settings: [{ org_id: "org1", data: { agent: { huntOnCycle: false } } }],
+      deals: [{ ...baseDeal, stage: "Rehab" }],
+      rehab_items: [
+        { id: "r1", org_id: "org1", deal_id: "d1", trade: "Roofing", status: "contracted", estimated_cost: 8_000, actual_cost: 0 },
+      ],
+    };
+    mockAdmin(store);
+
+    await runAgentCycle({ orgId: "org1", trigger: "manual" });
+
+    const rp = store.agent_actions?.find(
+      (a) => a.action_type === "record_payment" && a.status === "done"
+    );
+    expect(rp).toBeDefined();
+    const pay = store.payments?.find((p) => p.deal_id === "d1");
+    expect(pay).toBeDefined();
+    expect(pay?.amount).toBe(8_000);
+    expect(pay?.status).toBe("recorded");
+  });
+
+  it("approve_payment auto-approves a draw within autoSpendRehab limits", async () => {
+    const store: Store = {
+      org_settings: [
+        {
+          org_id: "org1",
+          data: {
+            agent: {
+              huntOnCycle: false,
+              limits: { autoSpendRehab: { enabled: true, monthlyCap: 100_000 } },
+            },
+          },
+        },
+      ],
+      deals: [{ ...baseDeal, stage: "Rehab" }],
+      payments: [{ id: "p1", org_id: "org1", deal_id: "d1", rehab_item_id: "r1", amount: 5_000, status: "recorded" }],
+    };
+    mockAdmin(store);
+
+    await runAgentCycle({ orgId: "org1", trigger: "manual", executeMoneyActions: false });
+
+    expect(store.payments?.find((p) => p.id === "p1")?.status).toBe("approved");
+    const ap = store.agent_actions?.find(
+      (a) => a.action_type === "approve_payment" && a.status === "auto_approved"
+    );
+    expect(ap).toBeDefined();
+    expect((ap?.metadata as Record<string, unknown>).guardrailRule).toBe("autoSpendRehab");
+  });
+
+  it("approve_payment escalates when autoSpendRehab is disabled", async () => {
+    const store: Store = {
+      org_settings: [{ org_id: "org1", data: { agent: { huntOnCycle: false } } }],
+      deals: [{ ...baseDeal, stage: "Rehab" }],
+      payments: [{ id: "p1", org_id: "org1", deal_id: "d1", rehab_item_id: "r1", amount: 5_000, status: "recorded" }],
+    };
+    mockAdmin(store);
+
+    await runAgentCycle({ orgId: "org1", trigger: "manual", executeMoneyActions: false });
+
+    expect(store.payments?.find((p) => p.id === "p1")?.status).toBe("recorded");
+    const ap = store.agent_actions?.find(
+      (a) => a.action_type === "approve_payment" && a.status === "pending_approval"
+    );
+    expect(ap).toBeDefined();
+  });
+
+  it("recommend_list_price computes max(arv, comps median × 1.02)", async () => {
+    const store: Store = {
+      org_settings: [{ org_id: "org1", data: { agent: { huntOnCycle: false } } }],
+      deals: [{ ...baseDeal, stage: "Rehab", arv_estimate: 150_000 }],
+      rehab_items: [{ id: "r1", org_id: "org1", deal_id: "d1", trade: "Roofing", status: "completed" }],
+      comps: [
+        { id: "c1", deal_id: "d1", sale_price: 180_000 },
+        { id: "c2", deal_id: "d1", sale_price: 200_000 },
+        { id: "c3", deal_id: "d1", sale_price: 220_000 },
+      ],
+    };
+    mockAdmin(store);
+
+    await runAgentCycle({ orgId: "org1", trigger: "manual" });
+
+    const rl = store.agent_actions?.find(
+      (a) => a.action_type === "recommend_list_price" && a.status === "done"
+    );
+    expect(rl).toBeDefined();
+    expect((rl?.metadata as Record<string, unknown>).listPrice).toBe(204_000);
+    expect((rl?.metadata as Record<string, unknown>).source).toContain("comps median");
+  });
+
+  it("predict_exit records timeline + projected proceeds", async () => {
+    const tenDaysAgo = new Date(Date.now() - 10 * 86_400_000).toISOString();
+    const store: Store = {
+      org_settings: [{ org_id: "org1", data: { agent: { huntOnCycle: false } } }],
+      deals: [{ ...baseDeal, stage: "Rehab", stage_changed_at: tenDaysAgo }],
+      underwriting: [{ id: "u1", deal_id: "d1", arv: 250_000, total_project_cost: 150_000 }],
+    };
+    mockAdmin(store);
+
+    await runAgentCycle({ orgId: "org1", trigger: "manual" });
+
+    const pe = store.agent_actions?.find(
+      (a) => a.action_type === "predict_exit" && a.status === "done"
+    );
+    expect(pe).toBeDefined();
+    expect((pe?.metadata as Record<string, unknown>).projectedProceeds).toBe(100_000);
+    expect((pe?.metadata as Record<string, unknown>).timelineDays).toBe(70);
+  });
+});
