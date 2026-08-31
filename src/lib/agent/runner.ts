@@ -7,6 +7,7 @@ import { getOrgSettings, underwritingFor, type OrgSettings } from "@/lib/orgSett
 import { verifyContractor } from "@/lib/contractorVerification";
 import { buildDeterministicRfq } from "@/lib/rfqBuilder";
 import { generateScopeForDeal } from "@/lib/agent/scope";
+import { evaluateAction } from "@/lib/guardrails/evaluate";
 import {
   planAgentActions,
   type PlannedAction,
@@ -254,10 +255,31 @@ async function executeStep(
   step: PlannedAction,
   policy: { executeMoneyActions: boolean; settings: OrgSettings }
 ): Promise<{ status: AgentActionStatus; reason?: string }> {
-  // Money gate: never execute unless caller explicitly authorized.
-  if (step.requires_approval && !policy.executeMoneyActions) {
-    await recordAction(admin, runId, orgId, step, "pending_approval", { awaiting: "operator" });
-    return { status: "pending_approval" };
+  // Money gate: never execute unless caller explicitly authorized. When limits
+  // are all-disabled (default) this evaluates to "escalate" — today's behavior.
+  if (step.requires_approval) {
+    const evaluation = evaluateAction(
+      { kind: step.kind, requiresApproval: true },
+      policy.settings.agent.limits,
+      { amount: step.metadata.amount as number | undefined }
+    );
+    if (evaluation.decision === "auto_approve" && policy.executeMoneyActions) {
+      // Fall through to execution (only in tests / explicit authorization).
+    } else if (evaluation.decision === "block") {
+      await recordAction(admin, runId, orgId, step, "blocked", {
+        awaiting: "none",
+        guardrail: evaluation.reason,
+      });
+      return { status: "blocked", reason: evaluation.reason };
+    } else {
+      await recordAction(admin, runId, orgId, step, "pending_approval", {
+        awaiting: "operator",
+        guardrail: evaluation.decision,
+        guardrailRule: evaluation.rule ?? null,
+        guardrailEvidence: evaluation.evidence ?? null,
+      });
+      return { status: "pending_approval" };
+    }
   }
 
   switch (step.kind) {
