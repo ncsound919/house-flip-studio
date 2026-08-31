@@ -1060,6 +1060,8 @@ export async function getAgentSummary(orgId: string): Promise<AgentRunSummary> {
   const byKindStatus: Record<string, Record<string, number>> = {};
   const errorCounts: Record<string, number> = {};
   let moneyGatesAwaiting = 0;
+  let autoApproved = 0;
+  let blockedCount = 0;
   for (const a of (actions ?? []) as Array<{
     action_type: string;
     status: string;
@@ -1075,6 +1077,8 @@ export async function getAgentSummary(orgId: string): Promise<AgentRunSummary> {
     if (a.requires_approval && a.status === "pending_approval") {
       moneyGatesAwaiting++;
     }
+    if (a.status === "auto_approved") autoApproved++;
+    if (a.status === "blocked") blockedCount++;
     if (a.status === "failed" || a.status === "blocked") {
       const msg =
         (a.metadata?.error as string) ?? (a.detail && a.detail !== "none" ? a.detail : null);
@@ -1098,6 +1102,8 @@ export async function getAgentSummary(orgId: string): Promise<AgentRunSummary> {
     byKindStatus,
     topErrors,
     moneyGatesAwaiting,
+    autoApproved,
+    blockedCount,
     lastRunAt: lastRun?.started_at ?? null,
     lastRunStatus: lastRun?.status ?? null,
   };
