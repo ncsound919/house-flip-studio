@@ -46,7 +46,9 @@ export interface Motivation {
   outOfStateOwner: boolean; // mailing state ≠ NC
   longHeld: boolean; // owned > 15 years (low basis, flexible seller)
   olderHome: boolean; // structure year < 1980 (rehab upside, less competition)
-  reasonCount: number; // count of active motivation signals (0–4)
+  multiParcelOwner: boolean; // same owner across >= 3 parcels (portfolio owner)
+  taxDelinquent: boolean; // county tax-delinquency flag on the record
+  reasonCount: number; // count of active motivation signals (0–6)
   reasons: string[];
 }
 
@@ -87,11 +89,23 @@ function computeMotivation(a: Record<string, unknown>): Motivation {
   const olderHome = Number.isFinite(year) && year > 0 && year < 1980;
   if (olderHome) reasons.push(`Older home (built ${year})`);
 
+  // 5. Multi-parcel owner: same owner across >= 3 parcels (portfolio owner).
+  const ownerCount = Number(a.ownercount ?? a.ownerCount);
+  const multiParcelOwner = Number.isFinite(ownerCount) && ownerCount >= 3;
+  if (multiParcelOwner) reasons.push("Multi-parcel owner (portfolio)");
+
+  // 6. Tax delinquent: county flag when exposed on the record.
+  const taxDelFlag = String(a.taxdelinquent ?? a.taxDelinquent ?? "").toUpperCase();
+  const taxDelinquent = taxDelFlag === "Y" || taxDelFlag === "YES" || taxDelFlag === "1";
+  if (taxDelinquent) reasons.push("Tax delinquent");
+
   return {
     absenteeOwner,
     outOfStateOwner,
     longHeld,
     olderHome,
+    multiParcelOwner,
+    taxDelinquent,
     reasonCount: reasons.length,
     reasons,
   };
@@ -167,6 +181,7 @@ export async function fetchCountyParcels(params: {
   const outFields = [
     "parno", "ownname", "siteadd", "scity", "mailadd", "mstate",
     "parval", "landval", "improvval", "gisacres", "saledate", "structyear", "cntyname",
+    "ownercount", "taxdelinquent",
   ].join(",");
 
   // Deterministic day-based rotation so successive hunts surface different

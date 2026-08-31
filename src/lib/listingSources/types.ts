@@ -27,6 +27,8 @@ export interface ListingCard {
     outOfStateOwner: boolean;
     longHeld: boolean;
     olderHome: boolean;
+    multiParcelOwner: boolean;
+    taxDelinquent: boolean;
     reasonCount: number;
     reasons: string[];
   };

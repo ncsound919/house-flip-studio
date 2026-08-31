@@ -21,6 +21,8 @@ function motivationWith(count: number, extra: Partial<ListingCard["motivation"]>
     outOfStateOwner: false,
     longHeld: false,
     olderHome: false,
+    multiParcelOwner: false,
+    taxDelinquent: false,
     reasonCount: count,
     reasons: Array.from({ length: count }, (_, i) => `signal-${i + 1}`),
     ...extra,
