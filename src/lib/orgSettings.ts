@@ -148,8 +148,11 @@ function deepMerge(
       ...base.agent,
       ...(patch.agent ?? {}),
       limits: {
-        ...base.agent.limits,
-        ...(patch.agent?.limits ?? {}),
+        autoSendOffers: { ...base.agent.limits.autoSendOffers, ...(patch.agent?.limits?.autoSendOffers ?? {}) },
+        autoSendRfq: { ...base.agent.limits.autoSendRfq, ...(patch.agent?.limits?.autoSendRfq ?? {}) },
+        autoSpendRehab: { ...base.agent.limits.autoSpendRehab, ...(patch.agent?.limits?.autoSpendRehab ?? {}) },
+        autoChase: { ...base.agent.limits.autoChase, ...(patch.agent?.limits?.autoChase ?? {}) },
+        autoScheduleInspections: { ...base.agent.limits.autoScheduleInspections, ...(patch.agent?.limits?.autoScheduleInspections ?? {}) },
       },
     },
     llm: { ...base.llm, ...(patch.llm ?? {}) },
