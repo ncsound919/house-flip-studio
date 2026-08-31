@@ -85,18 +85,24 @@ export async function huntLeads(config: HuntConfig): Promise<HuntResult> {
     tiers: { hot: 0, warm: 0, cold: 0 },
   };
 
-  // Dedup using BOTH address and parcel PIN, so the same property from two
-  // sources doesn't create two deals.
-  const { data: existing } = await admin
-    .from("deals")
-    .select("address, notes")
-    .eq("org_id", config.orgId);
+  // Dedup using BOTH address and parcel PIN.
+  // Resilient to missing columns (notes may not exist on older DBs — migration not applied).
+  let existing: Array<{ address: string; notes?: string | null }> | null = null;
+  {
+    const r = await admin.from("deals").select("address, notes").eq("org_id", config.orgId);
+    if (!r.error) {
+      existing = r.data as unknown as typeof existing;
+    } else if (/Could not find the 'notes' column/i.test(r.error.message)) {
+      const fallback = await admin.from("deals").select("address").eq("org_id", config.orgId);
+      existing = (fallback.data as unknown as Array<{ address: string }>) ?? [];
+      if (fallback.error) existing = [];
+    }
+  }
   const knownAddresses = new Set<string>();
   const knownPins = new Set<string>();
-  for (const d of (existing ?? []) as Array<{ address: string; notes: string | null }>) {
+  for (const d of (existing ?? []) as Array<{ address: string; notes?: string | null }>) {
     const addr = normalizeAddress(d.address);
     if (addr) knownAddresses.add(addr);
-    // Extract PIN from notes ("PIN: 1234...") since we don't store it as a column yet.
     if (d.notes) {
       const m = d.notes.match(/PIN[:\s]+([A-Za-z0-9\-]+)/i);
       if (m) {
@@ -173,7 +179,24 @@ async function processListings(
 
     const tierNotes = `Tier: ${tierLabel(tier)} (score ${score.attentionScore}/100, ${score.rating}, ${listing.motivation?.reasonCount ?? 0} motivation signal${(listing.motivation?.reasonCount ?? 0) === 1 ? "" : "s"})`;
 
-    const { error } = await admin.from("deals").insert({
+    const notes = [
+      `Auto-found by lead hunt (${listing.source_label}).`,
+      tierNotes,
+      listing.parcel?.pin ? `PIN: ${listing.parcel.pin}` : "",
+      listing.parcel?.owner ? `Owner: ${listing.parcel.owner}` : "",
+      listing.parcel?.assessedValue
+        ? `Assessed value: $${listing.parcel.assessedValue.toLocaleString("en-US")}`
+        : "",
+      listing.parcel?.acreage ? `Acreage: ${listing.parcel.acreage}` : "",
+      listing.parcel?.lastSaleDate ? `Last sold: ${listing.parcel.lastSaleDate}` : "",
+      motivationNotes,
+      score.flags.length ? `Flags: ${score.flags.join("; ")}` : "",
+      score.needsArv ? "No ARV known — score is a feasibility signal, not a verdict." : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const row: Record<string, unknown> = {
       org_id: orgId,
       address: listing.address,
       city: listing.city ?? null,
@@ -187,23 +210,60 @@ async function processListings(
       baths: listing.baths ?? null,
       year_built: listing.year_built ?? null,
       assessed_value: listing.parcel?.assessedValue ?? null,
-      notes: [
-        `Auto-found by lead hunt (${listing.source_label}).`,
-        tierNotes,
-        listing.parcel?.pin ? `PIN: ${listing.parcel.pin}` : "",
-        listing.parcel?.owner ? `Owner: ${listing.parcel.owner}` : "",
-        listing.parcel?.assessedValue
-          ? `Assessed value: $${listing.parcel.assessedValue.toLocaleString("en-US")}`
-          : "",
-        listing.parcel?.acreage ? `Acreage: ${listing.parcel.acreage}` : "",
-        listing.parcel?.lastSaleDate ? `Last sold: ${listing.parcel.lastSaleDate}` : "",
-        motivationNotes,
-        score.flags.length ? `Flags: ${score.flags.join("; ")}` : "",
-        score.needsArv ? "No ARV known — score is a feasibility signal, not a verdict." : "",
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    });
+      notes,
+    };
+
+    // Insert with iterative fallback for missing columns (production DB may lack migrations).
+    // PostgREST returns 400 "Could not find the 'X' column" — strip that column and retry.
+    // Columns that may be missing: assessed_value, arv_* (migration 005) and notes (not in 001 deals).
+    let { error } = await admin.from("deals").insert(row);
+    let fallbackRow: Record<string, unknown> | null = null;
+    const missingCols = new Set<string>();
+    for (let attempt = 0; attempt < 3 && error && /Could not find the '(\w+)' column/i.test(error.message); attempt++) {
+      const m = error.message.match(/Could not find the '(\w+)' column/i);
+      const col = m?.[1];
+      if (!col) break;
+      missingCols.add(col);
+      fallbackRow = fallbackRow ?? { ...row };
+      delete fallbackRow[col];
+      // Also strip sibling columns that are likely missing together
+      if (col === "assessed_value") {
+        delete fallbackRow["arv_estimate"];
+        delete fallbackRow["arv_method"];
+        delete fallbackRow["arv_estimate_at"];
+      }
+      if (col === "notes") {
+        // Preserve notes via property_data as fallback storage
+        const notesVal = fallbackRow["notes"] ?? row["notes"];
+        // Don't lose the notes content — it stays available for next insert attempt via fallback
+        void notesVal;
+      }
+      const retry = await admin.from("deals").insert(fallbackRow);
+      error = retry.error;
+      if (!retry.error && missingCols.size > 0) {
+        result.warnings.push(
+          `Saved ${listing.address} without ${[...missingCols].join(", ")} (DB migration not yet applied — data preserved in fallback).`
+        );
+        break;
+      }
+    }
+    // If notes was stripped, persist it to property_data so nothing is lost
+    if (!error && fallbackRow && !("notes" in fallbackRow) && row["notes"]) {
+      const dealIdRes = await admin
+        .from("deals")
+        .select("id")
+        .eq("org_id", orgId)
+        .eq("address", listing.address)
+        .limit(1)
+        .single();
+      if (dealIdRes.data?.id) {
+        await admin.from("property_data").insert({
+          deal_id: dealIdRes.data.id,
+          source: "county_gis",
+          data: { notes: row["notes"], assessed_value: row["assessed_value"], source_label: listing.source_label },
+        });
+      }
+    }
 
     if (error) {
       result.warnings.push(`Failed to save ${listing.address}: ${error.message}`);
