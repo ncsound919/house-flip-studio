@@ -79,6 +79,12 @@ export interface PlannerRecentChase {
   at: string;
 }
 
+export interface PlannerPayment {
+  rehab_item_id: string;
+  status: string; // 'recorded' | 'approved' | 'paid'
+  amount: number | null;
+}
+
 export interface PlannerState {
   orgId: string;
   deals: PlannerDeal[];
@@ -103,6 +109,10 @@ export interface PlannerState {
       max_offer: number | null;
     }
   >;
+  // Set of dealIds that already have a research dossier on file.
+  dossiers: Set<string>;
+  // Map of dealId → rehab draw ledger rows for that deal.
+  payments: Record<string, PlannerPayment[]>;
 }
 
 export interface PlannedAction {
@@ -125,6 +135,10 @@ const money = (n: number | null | undefined) =>
 // --- Per-stage rules ---------------------------------------------------------
 
 function planForLead(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
+  // 0) Compile a research dossier once per deal (county tax, liens, permits,
+  //    foreclosure notices, owner/occupancy). Non-money; runs in the job queue.
+  emitFetchDossierIfMissing(deal, state, out);
+
   // 1) ARV estimate if we have assessed_value or sqft and no estimate yet.
   if (deal.arv_estimate == null && (deal.assessed_value != null || deal.sqft != null)) {
     const est: ArvEstimate = estimateArv({
@@ -211,6 +225,18 @@ function promptForCompsIfMissing(deal: PlannerDeal, state: PlannerState, out: Pl
 }
 
 function planForInspecting(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
+  // Research dossier + inspection scheduling are non-money: the guardrail
+  // decides auto-schedule vs propose, the operator always authorizes the visit.
+  emitFetchDossierIfMissing(deal, state, out);
+  out.push({
+    kind: "schedule_inspection",
+    dealId: deal.id,
+    title: `Schedule inspection for ${deal.address}`,
+    detail: "Non-money. The agent proposes an inspection window; guardrails may auto-schedule, otherwise it stays an operator note.",
+    requires_approval: false,
+    metadata: { windowDays: 7, auto: false },
+  });
+
   // Draft a rehab scope early so budget planning can start before Rehab.
   const hasScope = state.rehabItems.some((r) => r.deal_id === deal.id);
   if (!hasScope) {
@@ -330,8 +356,41 @@ function planForRehab(deal: PlannerDeal, state: PlannerState, out: PlannedAction
   }
   // Chase any doc that's been requested > 7 days and is still missing/received.
   chaseOverdueDocuments(deal, state, out);
-  // If all rehab items completed, advance to Listed.
+
   const items = state.rehabItems.filter((r) => r.deal_id === deal.id);
+  const payments = state.payments[deal.id] ?? [];
+
+  // Rehab draw ledger: record a payment for each contracted item that doesn't
+  // have one yet (non-money — recording is bookkeeping, spending is gated).
+  for (const item of items) {
+    if (item.status !== "contracted") continue;
+    const alreadyRecorded = payments.some((p) => p.rehab_item_id === item.id);
+    if (!alreadyRecorded) {
+      out.push({
+        kind: "record_payment",
+        dealId: deal.id,
+        title: `Record payment draw for ${item.trade ?? "item"} on ${deal.address}`,
+        detail: "Non-money ledger entry for the contracted item. Spending it stays approval-gated.",
+        requires_approval: false,
+        metadata: { rehab_item_id: item.id, deal_id: deal.id },
+      });
+    }
+  }
+  // Money gate: a recorded-but-unapproved draw awaits approval before funds move.
+  for (const p of payments) {
+    if (p.status !== "recorded") continue;
+    if (hasPendingGate(state, deal.id, "approve_payment")) continue;
+    out.push({
+      kind: "approve_payment",
+      dealId: deal.id,
+      title: `Approve payment draw on ${deal.address}`,
+      detail: "MONEY GATE — a recorded rehab draw awaits approval before funds move.",
+      requires_approval: true,
+      metadata: { rehab_item_id: p.rehab_item_id, amount: p.amount, deal_id: deal.id },
+    });
+  }
+
+  // If all rehab items completed, advance to Listed.
   if (
     items.length > 0 &&
     items.every((r) => r.status === "completed") &&
@@ -345,6 +404,19 @@ function planForRehab(deal: PlannerDeal, state: PlannerState, out: PlannedAction
       requires_approval: true, // listing is a major business action
       metadata: { to: "Listed", itemCount: items.length },
       approval: { dealId: deal.id, toStage: "Listed" },
+    });
+  }
+
+  // Comps-based list price recommendation once rehab is complete. The listing
+  // advance itself stays money-gated; this only informs the operator.
+  if (items.length > 0 && items.every((r) => r.status === "completed")) {
+    out.push({
+      kind: "recommend_list_price",
+      dealId: deal.id,
+      title: `Recommend list price for ${deal.address}`,
+      detail: "Deterministic: max(ARV, comps median × 1.02). Listing stays operator-gated.",
+      requires_approval: false,
+      metadata: { arv: deal.arv_estimate },
     });
   }
 
@@ -369,11 +441,14 @@ function planForRehab(deal: PlannerDeal, state: PlannerState, out: PlannedAction
       });
     }
   }
+
+  emitPredictExit(deal, state, out);
 }
 
 function planForListed(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
   // Money gate: closing the sale.
   if (hasPendingGate(state, deal.id, "advance_stage", "Closed")) return;
+  emitPredictExit(deal, state, out);
   out.push({
     kind: "advance_stage",
     dealId: deal.id,
@@ -391,11 +466,37 @@ function hasPendingGate(
   state: PlannerState,
   dealId: string,
   kind: AgentActionKind,
-  to: string
+  to?: string
 ): boolean {
   return state.pendingGates.some(
-    (g) => g.dealId === dealId && g.kind === kind && (g.to == null || g.to === to)
+    (g) => g.dealId === dealId && g.kind === kind && (to == null || g.to == null || g.to === to)
   );
+}
+
+// One dossier per deal, queued once. The async job processor compiles it and
+// upserts the dossiers row, which flips this off on the next cycle.
+function emitFetchDossierIfMissing(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
+  if (state.dossiers.has(deal.id)) return;
+  out.push({
+    kind: "fetch_dossier",
+    dealId: deal.id,
+    title: `Compile research dossier for ${deal.address}`,
+    detail: "Queued: county tax record, liens, permits, foreclosure notices, and owner/occupancy signals.",
+    requires_approval: false,
+    metadata: { address: deal.address },
+  });
+}
+
+// Deterministic exit projection (timeline + proceeds vs carrying costs).
+function emitPredictExit(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
+  out.push({
+    kind: "predict_exit",
+    dealId: deal.id,
+    title: `Predict exit for ${deal.address}`,
+    detail: "Timeline + proceeds vs carrying costs. Deterministic projection — not a guarantee.",
+    requires_approval: false,
+    metadata: { projected: true },
+  });
 }
 
 // Contractor-level oversight, run once per cycle (not once per deal) so a

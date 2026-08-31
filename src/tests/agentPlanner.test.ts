@@ -34,6 +34,8 @@ function state(over: Partial<PlannerState> = {}): PlannerState {
     recentChases: [],
     comps: {},
     underwritings: {},
+    dossiers: new Set<string>(),
+    payments: {},
     ...over,
   };
 }
@@ -93,14 +95,16 @@ describe("planAgentActions — Lead stage", () => {
     expect(plan.find((p) => p.kind === "advance_stage" && p.metadata.to === "Inspecting")).toBeUndefined();
   });
 
-  it("emits no actions when deal has no usable data", () => {
+  it("emits only fetch_dossier when deal has no usable data", () => {
     const plan = planAgentActions(
       state({
         deals: [deal({ assessed_value: null, sqft: null, asking_price: null })],
       })
     );
-    // No arv inputs, no asking price → nothing the agent can do
-    expect(plan).toHaveLength(0);
+    // No arv inputs, no asking price → nothing actionable; the dossier fetch is
+    // still queued so research can surface data the planner can use next cycle.
+    expect(plan.filter((p) => p.kind !== "fetch_dossier")).toHaveLength(0);
+    expect(plan.some((p) => p.kind === "fetch_dossier")).toBe(true);
   });
 });
 
@@ -343,5 +347,94 @@ describe("planAgentActions — money gate integrity", () => {
         expect(p.requires_approval).toBe(true);
       }
     }
+  });
+});
+
+describe("planAgentActions — Phase 3 kinds", () => {
+  it("emits fetch_dossier for hot/warm leads in Lead/Inspecting", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [
+          deal({ id: "d-hot", stage: "Lead", assessed_value: 90_000 }),
+          deal({ id: "d-other", stage: "Lead", assessed_value: 30_000 }),
+        ],
+      })
+    );
+    const fd = plan.filter((p) => p.kind === "fetch_dossier");
+    // Lead tier isn't in planner state; we emit for all non-closed Lead deals
+    // and let the runner/settings decide. Assert at least one fetch_dossier.
+    expect(fd.length).toBeGreaterThan(0);
+  });
+
+  it("skips fetch_dossier when a dossier is already on file", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ id: "d-hot", stage: "Lead", assessed_value: 90_000 })],
+        dossiers: new Set(["d-hot"]),
+      })
+    );
+    expect(plan.some((p) => p.kind === "fetch_dossier")).toBe(false);
+  });
+
+  it("emits schedule_inspection for Inspecting deals within caps", () => {
+    const plan = planAgentActions(state({ deals: [deal({ stage: "Inspecting" })] }));
+    const si = plan.find((p) => p.kind === "schedule_inspection");
+    expect(si).toBeDefined();
+    expect(si!.requires_approval).toBe(false);
+  });
+
+  it("emits recommend_list_price when rehab complete and deal in Rehab", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ stage: "Rehab", arv_estimate: 250_000 })],
+        rehabItems: [{ id: "r1", deal_id: "d1", trade: "Roofing", status: "completed" }],
+      })
+    );
+    const rl = plan.find((p) => p.kind === "recommend_list_price");
+    expect(rl).toBeDefined();
+    expect(rl!.requires_approval).toBe(false);
+  });
+
+  it("emits predict_exit for Rehab/Listed deals", () => {
+    const plan = planAgentActions(state({ deals: [deal({ stage: "Rehab" })] }));
+    const pe = plan.find((p) => p.kind === "predict_exit");
+    expect(pe).toBeDefined();
+    expect(pe!.requires_approval).toBe(false);
+  });
+
+  it("emits record_payment for Rehab deals with contracted items", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ stage: "Rehab" })],
+        rehabItems: [{ id: "r1", deal_id: "d1", trade: "Roofing", status: "contracted" }],
+      })
+    );
+    const rp = plan.find((p) => p.kind === "record_payment");
+    expect(rp).toBeDefined();
+    expect(rp!.requires_approval).toBe(false);
+  });
+
+  it("does not re-record a payment that already exists for the item", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ stage: "Rehab" })],
+        rehabItems: [{ id: "r1", deal_id: "d1", trade: "Roofing", status: "contracted" }],
+        payments: { d1: [{ rehab_item_id: "r1", status: "recorded", amount: 5_000 }] },
+      })
+    );
+    expect(plan.some((p) => p.kind === "record_payment")).toBe(false);
+  });
+
+  it("emits approve_payment (MONEY GATE) when a recorded payment is unapproved", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ stage: "Rehab" })],
+        payments: { d1: [{ rehab_item_id: "r1", status: "recorded", amount: 5_000 }] },
+      })
+    );
+    const ap = plan.find((p) => p.kind === "approve_payment");
+    expect(ap).toBeDefined();
+    expect(ap!.requires_approval).toBe(true);
+    expect(ap!.metadata.amount).toBe(5_000);
   });
 });

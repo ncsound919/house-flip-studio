@@ -41,6 +41,8 @@ function state(over: Partial<PlannerState> = {}): PlannerState {
     recentChases: [],
     comps: {},
     underwritings: {},
+    dossiers: new Set<string>(),
+    payments: {},
     ...over,
   };
 }

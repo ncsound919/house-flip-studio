@@ -753,7 +753,7 @@ async function loadPlannerState(
     .neq("stage", "Closed");
   const dealIds = ((deals.data ?? []) as Array<{ id: string }>).map((d) => d.id);
 
-  const [{ data: documents }, { data: rehabItems }, { data: contractors }, { data: uws }, { data: rfqDrafts }, { data: comps }, { data: pendingGates }, { data: recentChases }] =
+  const [{ data: documents }, { data: rehabItems }, { data: contractors }, { data: uws }, { data: rfqDrafts }, { data: comps }, { data: pendingGates }, { data: recentChases }, { data: dossiers }, { data: paymentRows }] =
     await Promise.all([
       admin.from("documents").select("id, deal_id, rehab_item_id, doc_type, status, requested_at").eq("org_id", orgId),
       admin.from("rehab_items").select("id, deal_id, trade, status").eq("org_id", orgId),
@@ -782,6 +782,8 @@ async function loadPlannerState(
         .eq("org_id", orgId)
         .eq("action_type", "chase_document")
         .gte("created_at", new Date(Date.now() - 7 * 86_400_000).toISOString()),
+      admin.from("dossiers").select("deal_id").eq("org_id", orgId),
+      admin.from("payments").select("deal_id, rehab_item_id, amount, status").eq("org_id", orgId),
     ]);
 
   const underwritings: PlannerState["underwritings"] = {};
@@ -823,6 +825,27 @@ async function loadPlannerState(
     created_at: string;
   }>).map((c) => ({ contractorId: c.contractor_id, at: c.created_at }));
 
+  const dossiersSet: PlannerState["dossiers"] = new Set(
+    ((dossiers ?? []) as Array<{ deal_id: string | null }>)
+      .map((d) => d.deal_id)
+      .filter((id): id is string => id != null)
+  );
+
+  const paymentsByDeal: PlannerState["payments"] = {};
+  for (const p of (paymentRows ?? []) as Array<{
+    deal_id: string;
+    rehab_item_id: string | null;
+    amount: number | null;
+    status: string;
+  }>) {
+    if (!paymentsByDeal[p.deal_id]) paymentsByDeal[p.deal_id] = [];
+    paymentsByDeal[p.deal_id].push({
+      rehab_item_id: p.rehab_item_id ?? "",
+      status: p.status,
+      amount: p.amount,
+    });
+  }
+
   return {
     orgId,
     deals: (deals.data ?? []) as PlannerDeal[],
@@ -834,6 +857,8 @@ async function loadPlannerState(
     recentChases: recentChasesList,
     comps: compsByDeal,
     underwritings,
+    dossiers: dossiersSet,
+    payments: paymentsByDeal,
   };
 }
 
