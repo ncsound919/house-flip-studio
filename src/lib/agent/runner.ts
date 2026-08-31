@@ -7,6 +7,7 @@ import { getOrgSettings, underwritingFor, type OrgSettings } from "@/lib/orgSett
 import { verifyContractor } from "@/lib/contractorVerification";
 import { buildDeterministicRfq } from "@/lib/rfqBuilder";
 import { generateScopeForDeal } from "@/lib/agent/scope";
+import { evaluateAction } from "@/lib/guardrails/evaluate";
 import {
   planAgentActions,
   type PlannedAction,
@@ -37,12 +38,23 @@ import type {
 // the watchdog pane). The runner only mutates the world for non-money
 // actions.
 
+// Optional counters the guardrail engine uses for daily/monthly caps. Injected
+// by the caller (cron/manual) so the operator can bound autonomy per window.
+export interface AgentGuardrailCounters {
+  offersToday?: number;
+  rfqsToday?: number;
+  spendThisMonth?: number;
+  chasesToday?: number;
+  inspectionsToday?: number;
+}
+
 interface RunOptions {
   orgId: string;
   trigger: AgentRunTrigger;
   // Optional override: if true, also execute money-gated actions
   // (used only for tests). In production this is always false.
   executeMoneyActions?: boolean;
+  ctx?: AgentGuardrailCounters;
 }
 
 interface RunResult {
@@ -202,6 +214,7 @@ export async function runAgentCycle(opts: RunOptions): Promise<RunResult> {
         const { status, reason } = await executeStep(admin, opts.orgId, runId, step, {
           executeMoneyActions: !!opts.executeMoneyActions,
           settings,
+          ctx: opts.ctx,
         });
         actionCount++;
         if (step.requires_approval && status === "pending_approval") {
@@ -252,12 +265,49 @@ async function executeStep(
   orgId: string,
   runId: string,
   step: PlannedAction,
-  policy: { executeMoneyActions: boolean; settings: OrgSettings }
+  policy: { executeMoneyActions: boolean; settings: OrgSettings; ctx?: AgentGuardrailCounters }
 ): Promise<{ status: AgentActionStatus; reason?: string }> {
-  // Money gate: never execute unless caller explicitly authorized.
-  if (step.requires_approval && !policy.executeMoneyActions) {
-    await recordAction(admin, runId, orgId, step, "pending_approval", { awaiting: "operator" });
-    return { status: "pending_approval" };
+  // Money gate: the guardrail engine (Phase 1 skeleton, now live) decides.
+  // Defaults are all-disabled, so today's behavior (escalate to operator) is
+  // preserved until the operator opts into near-full autonomy per rule.
+  if (step.requires_approval) {
+    const evaluation = evaluateAction(
+      { kind: step.kind, requiresApproval: true, toStage: (step.metadata.to as string | undefined) ?? undefined },
+      policy.settings.agent.limits,
+      {
+        amount: moneyAmountFor(step),
+        offersToday: policy.ctx?.offersToday,
+        rfqsToday: policy.ctx?.rfqsToday,
+        spendThisMonth: policy.ctx?.spendThisMonth,
+        chasesToday: policy.ctx?.chasesToday,
+        inspectionsToday: policy.ctx?.inspectionsToday,
+      }
+    );
+    if (evaluation.decision === "auto_approve") {
+      if (!policy.executeMoneyActions) {
+        // Guardrail authorizes it — execute now, then record auto_approved with
+        // the rule + evidence that justified the autonomy.
+        const result = await executeMoneyAction(admin, runId, orgId, step);
+        await recordAction(admin, runId, orgId, step, "auto_approved", {
+          guardrailRule: evaluation.rule,
+          guardrailEvidence: evaluation.evidence,
+          ...(result.reason ? { error: result.reason } : {}),
+        });
+        return { status: "auto_approved", reason: result.reason };
+      }
+      // Fall through to normal execution (explicit authorization path).
+    } else if (evaluation.decision === "block") {
+      await recordAction(admin, runId, orgId, step, "blocked", {
+        guardrailReason: evaluation.reason,
+      });
+      return { status: "blocked", reason: evaluation.reason };
+    } else {
+      await recordAction(admin, runId, orgId, step, "pending_approval", {
+        awaiting: "operator",
+        guardrailDecision: evaluation.decision,
+      });
+      return { status: "pending_approval" };
+    }
   }
 
   switch (step.kind) {
@@ -379,6 +429,19 @@ async function applyAdvanceStage(
   orgId: string,
   step: PlannedAction
 ): ExecResult {
+  const result = await mutateAdvanceStage(admin, step);
+  if (result.status !== "done") return result;
+  await recordAction(admin, runId, orgId, step, "done", { to: step.metadata.to });
+  return result;
+}
+
+// Core stage mutation shared by the manual-approval path (approveAgentAction
+// re-derives it) and the guardrail auto-approve path, so both produce the same
+// world-state. Never records an action — callers own the audit log entry.
+async function mutateAdvanceStage(
+  admin: ReturnType<typeof createAdminClient>,
+  step: PlannedAction
+): Promise<{ status: AgentActionStatus; reason?: string; to?: string }> {
   const to = step.metadata.to as string | undefined;
   if (!to || !DEAL_STAGES.includes(to as (typeof DEAL_STAGES)[number])) {
     return { status: "skipped", reason: `unknown target stage: ${to}` };
@@ -398,11 +461,7 @@ async function applyAdvanceStage(
     // Covers already-at-target (idempotent no-op) and regressions (e.g. a deal
     // the operator moved to Rehab must not be pulled back to Under Contract).
     if (fromIdx >= toIdx) {
-      await recordAction(admin, runId, orgId, step, "skipped", {
-        reason: `deal already at/after ${to} (current ${currentStage})`,
-        currentStage,
-      });
-      return { status: "skipped", reason: `deal already at/after ${to}` };
+      return { status: "skipped", reason: `deal already at/after ${to} (current ${currentStage})` };
     }
   }
   const { error } = await admin
@@ -410,8 +469,51 @@ async function applyAdvanceStage(
     .update({ stage: to, stage_changed_at: new Date().toISOString() })
     .eq("id", step.dealId);
   if (error) return { status: "failed", reason: error.message };
-  await recordAction(admin, runId, orgId, step, "done", { to });
-  return { status: "done" };
+  return { status: "done", to };
+}
+
+// Amount the guardrail should evaluate for a money step. advance_stage carries
+// the offer in its underwriting snapshot (uw.max_offer) rather than a flat
+// amount, so we read it from there.
+function moneyAmountFor(step: PlannedAction): number | undefined {
+  if (step.metadata.amount != null) return Number(step.metadata.amount);
+  if (step.kind === "advance_stage") {
+    const uw = step.metadata.uw as { max_offer?: unknown } | undefined;
+    if (uw && uw.max_offer != null) return Number(uw.max_offer);
+  }
+  return undefined;
+}
+
+// Guardrail-authorized money execution. Routes to the same core mutators the
+// manual approval path uses so world-state is identical either way. The audit
+// log entry is written by the caller (auto_approved) or the wrapper (done).
+async function executeMoneyAction(
+  admin: ReturnType<typeof createAdminClient>,
+  runId: string,
+  orgId: string,
+  step: PlannedAction
+): Promise<{ status: AgentActionStatus; reason?: string }> {
+  switch (step.kind) {
+    case "advance_stage":
+      return await mutateAdvanceStage(admin, step);
+    case "approve_payment":
+      return await mutateApprovePayment(admin, step);
+    case "send_rfq":
+    case "send_offer":
+    case "start_rehab":
+      return { status: "skipped", reason: "no live money mutator for this kind in this phase" };
+    default:
+      return { status: "skipped", reason: "not a money action" };
+  }
+}
+
+// Placeholder for Task 5's draw-approval mutator — keeps the guardrail routing
+// stable until the full applyApprovePayment handler lands.
+async function mutateApprovePayment(
+  _admin: ReturnType<typeof createAdminClient>,
+  _step: PlannedAction
+): Promise<{ status: AgentActionStatus; reason?: string }> {
+  return { status: "skipped", reason: "approve_payment mutator lands in Task 5" };
 }
 
 async function applyGenerateDocument(

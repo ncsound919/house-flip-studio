@@ -1,9 +1,16 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   planAgentActions,
   type PlannerState,
   type PlannerDeal,
 } from "../lib/agent/planner";
+import { runAgentCycle } from "../lib/agent/runner";
+
+vi.mock("@/lib/apiHelpers", () => ({
+  createAdminClient: vi.fn(),
+}));
+
+import { createAdminClient } from "@/lib/apiHelpers";
 
 function deal(over: Partial<PlannerDeal> = {}): PlannerDeal {
   return {
@@ -256,5 +263,212 @@ describe("planAgentActions — run-level contractor oversight", () => {
       })
     );
     expect(plan.some((p) => p.kind === "chase_document" && p.contractorId === "c1")).toBe(true);
+  });
+});
+
+// --- Runner: guardrails live -------------------------------------------------
+// A fake admin backed by an in-memory store, mirroring how the runner reads real
+// DB state (deals, underwriting, org_settings) and writes agent_actions.
+
+type Row = Record<string, unknown>;
+type Store = Record<string, Row[]>;
+
+let rowCounter = 0;
+
+function makeAdmin(store: Store) {
+  const build = (table: string) => {
+    let rows: Row[] = [...(store[table] ?? [])];
+    let mode: "query" | "insert" | "update" | "upsert" | "delete" = "query";
+    let insertRows: Row[] = [];
+    let patch: Row = {};
+
+    const b: Record<string, unknown> = {};
+    b.select = () => b;
+    b.eq = (k: string, v: unknown) => {
+      rows = rows.filter((r) => r[k] === v);
+      return b;
+    };
+    b.neq = (k: string, v: unknown) => {
+      rows = rows.filter((r) => r[k] !== v);
+      return b;
+    };
+    b.in = (k: string, vals: unknown[]) => {
+      rows = rows.filter((r) => vals.includes(r[k]));
+      return b;
+    };
+    b.gte = (k: string, v: unknown) => {
+      rows = rows.filter((r) => (r[k] as number) >= (v as number));
+      return b;
+    };
+    b.lte = (k: string, v: unknown) => {
+      rows = rows.filter((r) => (r[k] as number) <= (v as number));
+      return b;
+    };
+    b.order = (col: string, opts?: { ascending?: boolean }) => {
+      rows = [...rows].sort((a, z) => {
+        const av = a[col] as string | number | null | undefined;
+        const zv = z[col] as string | number | null | undefined;
+        if (av == null && zv == null) return 0;
+        if (av == null) return 1;
+        if (zv == null) return -1;
+        if (av < zv) return opts?.ascending === false ? 1 : -1;
+        if (av > zv) return opts?.ascending === false ? -1 : 1;
+        return 0;
+      });
+      return b;
+    };
+    b.limit = (n: number) => {
+      rows = rows.slice(0, n);
+      return b;
+    };
+    b.single = async () => ({
+      data: mode === "insert" ? insertRows[0] ?? null : rows[0] ?? null,
+      error: null,
+    });
+    b.insert = (row: Row | Row[]) => {
+      const toAdd = (Array.isArray(row) ? row : [row]).map((r) => ({
+        ...r,
+        id: r.id ?? `row-${++rowCounter}`,
+      }));
+      store[table] = [...(store[table] ?? []), ...toAdd];
+      insertRows = toAdd;
+      mode = "insert";
+      return b;
+    };
+    b.update = (p: Row) => {
+      patch = p;
+      mode = "update";
+      return b;
+    };
+    b.upsert = (row: Row, opts?: { onConflict?: string }) => {
+      const col = opts?.onConflict ?? "id";
+      const arr = store[table] ?? [];
+      const idx = arr.findIndex((r) => r[col] === row[col]);
+      if (idx >= 0) arr[idx] = { ...arr[idx], ...row };
+      else arr.push({ ...row });
+      store[table] = arr;
+      mode = "upsert";
+      return b;
+    };
+    b.delete = () => {
+      mode = "delete";
+      return b;
+    };
+    b.then = (resolve: (v: unknown) => void, reject: (e: unknown) => void) => {
+      const result = (async () => {
+        if (mode === "insert") return { data: insertRows, error: null };
+        if (mode === "update") {
+          for (const r of rows) Object.assign(r, patch);
+          return { data: rows, error: null };
+        }
+        if (mode === "delete") {
+          const ids = rows.map((r) => r.id);
+          store[table] = (store[table] ?? []).filter((r) => !ids.includes(r.id));
+          return { data: null, error: null };
+        }
+        return { data: rows, error: null };
+      })();
+      return result.then(resolve, reject);
+    };
+    return b;
+  };
+  return { from: (table: string) => build(table) };
+}
+
+function mockAdmin(store: Store) {
+  vi.mocked(createAdminClient).mockReturnValue(makeAdmin(store) as never);
+}
+
+// A deal in Underwriting passing the 70% rule, so the planner emits the
+// advance_stage → Offer Made money gate. huntOnCycle off to isolate planning.
+function gateStore(limits?: Record<string, unknown>): Store {
+  return {
+    org_settings: [
+      {
+        org_id: "org1",
+        data: { agent: { huntOnCycle: false, ...(limits ? { limits } : {}) } },
+      },
+    ],
+    deals: [
+      {
+        id: "d1",
+        org_id: "org1",
+        address: "1 Main St",
+        city: "Charlotte",
+        stage: "Underwriting",
+        asking_price: 200_000,
+        sqft: 1500,
+        year_built: 1970,
+        assessed_value: 90_000,
+        arv_estimate: 280_000,
+        arv_method: "comps",
+      },
+    ],
+    underwriting: [
+      {
+        id: "u1",
+        deal_id: "d1",
+        arv: 280_000,
+        max_offer: 45_000,
+        projected_profit: 20_000,
+        passes_70_rule: true,
+      },
+    ],
+    rehab_items: [{ id: "r1", org_id: "org1", deal_id: "d1", trade: "Roofing", status: "estimated" }],
+    comps: [{ id: "c1", deal_id: "d1", sale_price: 270_000 }],
+  };
+}
+
+describe("runner — guardrails live", () => {
+  it("auto-approves a money action within limits and records auto_approved", async () => {
+    const store = gateStore({
+      autoSendOffers: { enabled: true, maxOfferAmount: 50_000, dailyCap: 5 },
+    });
+    mockAdmin(store);
+
+    const result = await runAgentCycle({ orgId: "org1", trigger: "manual", executeMoneyActions: false });
+
+    const deal = store.deals.find((d) => d.id === "d1");
+    expect(deal?.stage).toBe("Offer Made"); // world-state mutated by guardrail auth
+    const auto = store.agent_actions?.find(
+      (a) => a.action_type === "advance_stage" && a.status === "auto_approved"
+    );
+    expect(auto).toBeDefined();
+    expect((auto?.metadata as Record<string, unknown>).guardrailRule).toBe("autoSendOffers");
+    expect((auto?.metadata as Record<string, unknown>).guardrailEvidence).toContain("45,000");
+    expect(result.moneyGatesAwaiting).toBe(0);
+  });
+
+  it("escalates a money action to pending_approval when the guardrail is disabled", async () => {
+    const store = gateStore();
+    mockAdmin(store);
+
+    const result = await runAgentCycle({ orgId: "org1", trigger: "manual", executeMoneyActions: false });
+
+    const deal = store.deals.find((d) => d.id === "d1");
+    expect(deal?.stage).toBe("Underwriting"); // NOT advanced
+    const pend = store.agent_actions?.find(
+      (a) => a.action_type === "advance_stage" && a.status === "pending_approval"
+    );
+    expect(pend).toBeDefined();
+    expect(result.moneyGatesAwaiting).toBe(1);
+  });
+
+  it("blocks a money action over the limit and does not advance the deal", async () => {
+    const store = gateStore({
+      autoSendOffers: { enabled: true, maxOfferAmount: 30_000, dailyCap: 5 },
+    });
+    mockAdmin(store);
+
+    const result = await runAgentCycle({ orgId: "org1", trigger: "manual", executeMoneyActions: false });
+
+    const deal = store.deals.find((d) => d.id === "d1");
+    expect(deal?.stage).toBe("Underwriting"); // NOT advanced
+    const blocked = store.agent_actions?.find(
+      (a) => a.action_type === "advance_stage" && a.status === "blocked"
+    );
+    expect(blocked).toBeDefined();
+    expect((blocked?.metadata as Record<string, unknown>).guardrailReason).toContain("maxOfferAmount");
+    expect(result.moneyGatesAwaiting).toBe(0);
   });
 });
