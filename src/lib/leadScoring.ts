@@ -116,6 +116,8 @@ export function scoreLead(listing: ListingCard, flipProfile?: FlipProfile): Lead
   if (m?.absenteeOwner) { score += 8; flags.push("Absentee owner — motivated seller signal"); }
   if (m?.longHeld) { score += 10; flags.push("Long-held — low basis, potential seller financing"); }
   if (m?.olderHome) score += 5;
+  if (m?.multiParcelOwner) { score += 10; flags.push("Multi-parcel owner — portfolio, may be motivated to sell"); }
+  if (m?.taxDelinquent) { score += 12; flags.push("tax delinquent — distress signal, potential lien/title risk"); }
 
   // Acreage — large lots suggest rural/land deals, not house flips.
   if (listing.parcel?.acreage != null && listing.parcel.acreage > 5) {
