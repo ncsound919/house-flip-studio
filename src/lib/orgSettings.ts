@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { createAdminClient } from "@/lib/apiHelpers";
+import { guardrailLimitsSchema, DEFAULT_GUARDRAILS } from "@/lib/guardrails/limits";
 
 // Org settings — the operator's strategy, stored per-org and read by the
 // planner, runner, lead hunt, and underwriting. Replaces hardcoded constants
@@ -28,6 +29,7 @@ export const agentSettingsSchema = z.object({
   enabled: z.boolean().default(true),
   huntOnCycle: z.boolean().default(true),
   maxHuntPerCycle: z.number().default(100),
+  limits: guardrailLimitsSchema.default({}),
 });
 
 export const llmSettingsSchema = z.object({
@@ -44,6 +46,7 @@ export const orgSettingsSchema = z.object({
 export type OrgSettings = z.infer<typeof orgSettingsSchema>;
 export type FlipProfile = z.infer<typeof flipProfileSchema>;
 export type UnderwritingSettings = z.infer<typeof underwritingSchema>;
+export type AgentSettings = z.infer<typeof agentSettingsSchema>;
 
 export type DeepPartial<T> = {
   [P in keyof T]?: T[P] extends object ? DeepPartial<T[P]> : T[P];
@@ -68,6 +71,7 @@ export const DEFAULT_SETTINGS: OrgSettings = {
     enabled: true,
     huntOnCycle: true,
     maxHuntPerCycle: 100,
+    limits: DEFAULT_GUARDRAILS,
   },
   llm: {
     generateScopes: true,
@@ -140,7 +144,14 @@ function deepMerge(
         : base.flipProfile.counties,
     },
     underwriting: { ...base.underwriting, ...(patch.underwriting ?? {}) },
-    agent: { ...base.agent, ...(patch.agent ?? {}) },
+    agent: {
+      ...base.agent,
+      ...(patch.agent ?? {}),
+      limits: {
+        ...base.agent.limits,
+        ...(patch.agent?.limits ?? {}),
+      } as OrgSettings["agent"]["limits"],
+    },
     llm: { ...base.llm, ...(patch.llm ?? {}) },
   };
 }

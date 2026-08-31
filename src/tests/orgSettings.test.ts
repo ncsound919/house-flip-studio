@@ -6,6 +6,7 @@ import {
   flipProfileFor,
   underwritingFor,
 } from "../lib/orgSettings";
+import { DEFAULT_GUARDRAILS } from "../lib/guardrails/limits";
 
 vi.mock("@/lib/apiHelpers", () => ({
   createAdminClient: vi.fn(),
@@ -116,5 +117,50 @@ describe("orgSettings", () => {
     // Stored settings untouched — never reset to defaults on a bad patch.
     const stored = store.org_settings as { data: { flipProfile: { minAssessed: number } } };
     expect(stored.data.flipProfile.minAssessed).toBe(60_000);
+  });
+});
+
+describe("orgSettings — agent.limits", () => {
+  it("defaults agent.limits to all-disabled guardrails", () => {
+    const s = parseOrgSettings({});
+    expect(s.agent.limits).toEqual(DEFAULT_GUARDRAILS);
+  });
+
+  it("preserves an explicit limits patch", () => {
+    const s = parseOrgSettings({
+      agent: { limits: { autoSendOffers: { enabled: true, maxOfferAmount: 40_000, dailyCap: 3 } } },
+    });
+    expect(s.agent.limits.autoSendOffers.enabled).toBe(true);
+    expect(s.agent.limits.autoSendOffers.maxOfferAmount).toBe(40_000);
+  });
+
+  it("DEFAULT_SETTINGS carries limits", () => {
+    expect(DEFAULT_SETTINGS.agent.limits).toEqual(DEFAULT_GUARDRAILS);
+  });
+
+  it("deepMerge preserves nested limits on save", async () => {
+    const store: Record<string, unknown> = {
+      org_settings: {
+        org_id: "org1",
+        data: {
+          flipProfile: {},
+          underwriting: {},
+          agent: { enabled: true, huntOnCycle: true, maxHuntPerCycle: 100, limits: DEFAULT_GUARDRAILS },
+          llm: {},
+        },
+        updated_at: "x",
+      },
+    };
+    vi.mocked(createAdminClient).mockReturnValue(makeAdmin(store) as never);
+
+    const saved = await saveOrgSettings("org1", {
+      agent: { limits: { autoSendOffers: { enabled: true, maxOfferAmount: 50_000, dailyCap: 2 } } },
+    });
+    expect(saved.agent.limits.autoSendOffers.enabled).toBe(true);
+    expect(saved.agent.limits.autoSendOffers.maxOfferAmount).toBe(50_000);
+    // Unrelated limits stay at defaults — never wiped by a patch.
+    expect(saved.agent.limits.autoSpendRehab.enabled).toBe(false);
+    const stored = store.org_settings as { data: { agent: { limits: typeof DEFAULT_GUARDRAILS } } };
+    expect(stored.data.agent.limits.autoSendOffers.enabled).toBe(true);
   });
 });
