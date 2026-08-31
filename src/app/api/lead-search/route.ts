@@ -2,11 +2,14 @@ import { NextResponse } from "next/server";
 import { requireOrgId } from "@/lib/apiHelpers";
 import { fetchCountyParcels } from "@/lib/listingSources/countyParcels";
 import { getCountyGuidance } from "@/lib/countyGis";
+import { getOrgSettings } from "@/lib/orgSettings";
 import type { ListingCard } from "@/lib/listingSources/types";
 
 export async function POST(req: Request) {
+  let orgId: string;
   try {
-    await requireOrgId();
+    const ctx = await requireOrgId();
+    orgId = ctx.orgId;
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Unauthorized" },
@@ -23,6 +26,11 @@ export async function POST(req: Request) {
 
   const county = typeof body.county === "string" ? body.county.trim() : "";
   const address = typeof body.address === "string" ? body.address : undefined;
+  // Flip profile — affordability filter. Defaults to the org's settings,
+  // overridable per search so the operator can widen/narrow.
+  const profile = (await getOrgSettings(orgId)).flipProfile;
+  const minAssessed = typeof body.minAssessed === "number" ? body.minAssessed : profile.minAssessed;
+  const maxAssessed = typeof body.maxAssessed === "number" ? body.maxAssessed : profile.maxAssessed;
   const rawSources = Array.isArray(body.sources) ? body.sources : [];
   const sources = rawSources.filter(
     (s): s is "county_gis" | "tax_records" =>
@@ -41,7 +49,13 @@ export async function POST(req: Request) {
   if (sources.includes("tax_records")) {
     tasks.push(
       (async () => {
-        const parcel = await fetchCountyParcels({ county, address, max: 25 });
+        const parcel = await fetchCountyParcels({
+          county,
+          address,
+          max: 25,
+          minAssessed,
+          maxAssessed,
+        });
         if (parcel.status === "not_connected") {
           warnings.push(
             `${county} county tax-record feed is not connected yet. Use county GIS manual entry for now.`
@@ -49,7 +63,9 @@ export async function POST(req: Request) {
         } else if (parcel.error) {
           warnings.push(`County tax-record feed error: ${parcel.error}`);
         } else if (parcel.cards.length === 0) {
-          warnings.push(`No tax parcels found matching "${address ?? "all"}" in ${county} County.`);
+          warnings.push(
+            `No affordable properties found in ${county} County (assessed $${minAssessed.toLocaleString("en-US")}–$${maxAssessed.toLocaleString("en-US")}). Try widening the budget.`
+          );
         } else {
           results.push(...parcel.cards);
         }

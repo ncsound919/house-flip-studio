@@ -34,6 +34,7 @@ export async function sendEmail(msg: EmailMessage): Promise<SendEmailResult> {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
+      signal: AbortSignal.timeout(15_000),
       body: JSON.stringify({
         from,
         to: msg.to,

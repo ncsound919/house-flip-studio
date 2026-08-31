@@ -54,4 +54,19 @@ describe("parseNclbgcResponse", () => {
     expect(r.licenseTier).toBeDefined();
     expect(typeof r.licenseTier).toBe("string");
   });
+
+  it("does NOT verify a page that merely mentions 'license' and 'active' in nav/footer copy", () => {
+    const falsePositiveHtml = `
+      <html><body>
+        <nav>Find an active license in North Carolina</nav>
+        <main>
+          <h1>No licenses found matching your search</h1>
+          <p>Try a different license number or name.</p>
+        </main>
+        <footer>Licensed contractors must remain active and in good standing.</footer>
+      </body></html>
+    `;
+    const r = parseNclbgcResponse(falsePositiveHtml);
+    expect(r.verified).toBe(false);
+  });
 });

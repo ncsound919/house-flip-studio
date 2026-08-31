@@ -1,27 +1,38 @@
 import { NextResponse } from "next/server";
 import { requireOrgId } from "@/lib/apiHelpers";
 import { huntLeads, type HuntResult } from "@/lib/leadHunt";
+import { getOrgSettings } from "@/lib/orgSettings";
 
-const DEFAULT_COUNTIES = ["Mecklenburg", "Wake", "Durham", "Guilford"];
+// Uses the org's flip profile (budget band, counties, hunt cap).
+// Body may override with { counties: [...] } to restrict to a region.
 
 export async function POST(request: Request) {
   try {
     const { orgId } = await requireOrgId();
+    const settings = await getOrgSettings(orgId);
 
-    let counties = DEFAULT_COUNTIES;
+    let statewide = settings.flipProfile.statewide;
+    let counties: string[] | undefined = settings.flipProfile.counties;
+    let maxTotal = settings.flipProfile.maxHuntPerRun;
     try {
       const body = await request.json();
       if (Array.isArray(body?.counties) && body.counties.length > 0) {
+        statewide = false;
         counties = body.counties;
       }
+      if (typeof body?.maxTotal === "number" && body.maxTotal > 0) {
+        maxTotal = Math.min(body.maxTotal, 500);
+      }
     } catch {
-      // no body → default counties
+      // no body → org flip profile
     }
 
     const result: HuntResult = await huntLeads({
       orgId,
+      statewide,
       counties,
-      maxPerCounty: 25,
+      maxTotal,
+      settings,
     });
 
     return NextResponse.json(result);

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Bot, Zap, CheckCircle2, AlertTriangle, Clock } from "lucide-react";
+import { Bot, Zap, CheckCircle2, AlertTriangle, Clock, RefreshCw } from "lucide-react";
 
 interface AgentActionsResponse {
   actions: {
@@ -24,6 +24,10 @@ interface AgentActionsResponse {
     started_at: string;
     finished_at: string | null;
   }[];
+  summary?: {
+    byKindStatus?: Record<string, Record<string, number>>;
+    topErrors?: { message: string; count: number }[];
+  };
 }
 
 const money = (n: number | null | undefined) =>
@@ -113,6 +117,8 @@ export default function AgentPane() {
     (a) => !pendingApprovals.includes(a)
   ).slice(0, 8);
   const lastRun = data?.runs?.[0];
+  const lastRunFailed = lastRun?.status === "failed" || lastRun?.status === "partial";
+  const topErrors = data?.summary?.topErrors ?? [];
 
   return (
     <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
@@ -128,20 +134,50 @@ export default function AgentPane() {
             </span>
           ) : null}
         </div>
-        <button
-          onClick={runNow}
-          disabled={running}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-violet-700 disabled:opacity-60"
-        >
-          <Zap className="h-3.5 w-3.5" />
-          {running ? "Running…" : "Run now"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={runNow}
+            disabled={running}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-violet-700 disabled:opacity-60"
+          >
+            {running ? (
+              <>
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                Running…
+              </>
+            ) : lastRunFailed ? (
+              <>
+                <RefreshCw className="h-3.5 w-3.5" />
+                Retry last run
+              </>
+            ) : (
+              <>
+                <Zap className="h-3.5 w-3.5" />
+                Run now
+              </>
+            )}
+          </button>
+        </div>
       </div>
       <p className="mt-1 text-xs text-zinc-500">
         {lastRun
           ? `Last run ${timeAgo(lastRun.started_at)} — ${lastRun.status}.`
           : "Never run. Click Run now to let the agent hunt, score, draft, and chase on your behalf."}
       </p>
+      {lastRunFailed ? (
+        <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          The last run was {lastRun?.status}. Re-running retries the failed actions; money gates re-queue for your approval.
+        </p>
+      ) : null}
+      {topErrors.length > 0 ? (
+        <div className="mt-2 space-y-1">
+          {topErrors.map((e, i) => (
+            <p key={i} className="truncate rounded-lg bg-red-50/70 px-3 py-1.5 text-[11px] text-red-700" title={e.message}>
+              {e.count}× {e.message}
+            </p>
+          ))}
+        </div>
+      ) : null}
       {runMsg ? (
         <p className="mt-2 rounded-lg bg-violet-50 px-3 py-2 text-xs text-violet-800">
           {runMsg}

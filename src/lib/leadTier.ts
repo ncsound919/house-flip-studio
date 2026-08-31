@@ -1,5 +1,6 @@
 import type { ListingCard } from "@/lib/listingSources/types";
 import { scoreLead, type LeadScore } from "@/lib/leadScoring";
+import type { FlipProfile } from "@/lib/orgSettings";
 
 // Lead quality tier — combines the deterministic score with the motivation
 // signals. This is the headline label on a new lead ("HOT", "WARM", "COLD")
@@ -37,7 +38,7 @@ export function tierLabel(tier: LeadTier): string {
 }
 
 // Convenience: full pipeline (score + tier) for a listing card.
-export function scoreAndTier(card: ListingCard): { score: LeadScore; tier: LeadTier } {
-  const score = scoreLead(card);
+export function scoreAndTier(card: ListingCard, flipProfile?: FlipProfile): { score: LeadScore; tier: LeadTier } {
+  const score = scoreLead(card, flipProfile);
   return { score, tier: tierForLead(card, score) };
 }

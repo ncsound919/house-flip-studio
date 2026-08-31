@@ -14,6 +14,14 @@ interface DashboardData {
     actions: number;
     overdueDocs: number;
   };
+  kpis: {
+    projectedProfitSum: number;
+    arvSum: number;
+    tiers: { hot: number; warm: number; cold: number };
+    avgStageDwell: { stage: string; avgDays: number }[];
+    moneyGatesAwaiting: number;
+    lastAgentRun: { status: string; started_at: string | null } | null;
+  };
   flags: string[];
   actions: {
     id: string;
@@ -50,6 +58,18 @@ const kindLabel: Record<string, string> = {
   document: "Paperwork",
   contractor: "Contractor",
 };
+
+function timeAgo(iso: string | null): string {
+  if (!iso) return "never";
+  const d = new Date(iso);
+  const secs = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
 
 export default function CommandCenter() {
   const [data, setData] = useState<DashboardData | null>(null);
@@ -178,6 +198,83 @@ export default function CommandCenter() {
           <p className="mt-2 text-3xl font-bold tracking-tight text-zinc-900">{data?.counts.flags}</p>
           <p className="mt-1 text-xs text-red-600">Review below</p>
         </div>
+      </div>
+
+      {/* Business pulse — KPIs the agent moves every cycle */}
+      <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center justify-between">
+          <h2 className="flex items-center gap-2 text-base font-semibold text-zinc-900">
+            <span className="rounded-lg bg-emerald-50 p-1.5 text-emerald-600">
+              <Zap className="h-4 w-4" />
+            </span>
+            Business pulse
+          </h2>
+          {data?.kpis.lastAgentRun ? (
+            <span
+              className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                data.kpis.lastAgentRun.status === "completed"
+                  ? "bg-emerald-50 text-emerald-700"
+                  : data.kpis.lastAgentRun.status === "running"
+                  ? "bg-blue-50 text-blue-700"
+                  : data.kpis.lastAgentRun.status === "partial"
+                  ? "bg-amber-50 text-amber-700"
+                  : data.kpis.lastAgentRun.status === "skipped"
+                  ? "bg-zinc-100 text-zinc-600"
+                  : "bg-red-50 text-red-700"
+              }`}
+            >
+              Agent {data.kpis.lastAgentRun.status} · {timeAgo(data.kpis.lastAgentRun.started_at)}
+            </span>
+          ) : (
+            <span className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-[11px] font-semibold text-zinc-500">
+              Agent not run yet
+            </span>
+          )}
+        </div>
+        <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="rounded-xl bg-emerald-50/60 p-3">
+            <p className="text-[11px] font-medium text-emerald-700">Projected profit (open deals)</p>
+            <p className="mt-1 text-xl font-bold tracking-tight text-zinc-900">
+              {money(data?.kpis.projectedProfitSum ?? 0)}
+            </p>
+          </div>
+          <div className="rounded-xl bg-blue-50/60 p-3">
+            <p className="text-[11px] font-medium text-blue-700">Open-deal ARV sum</p>
+            <p className="mt-1 text-xl font-bold tracking-tight text-zinc-900">
+              {money(data?.kpis.arvSum ?? 0)}
+            </p>
+          </div>
+          <div className="rounded-xl bg-violet-50/60 p-3">
+            <p className="text-[11px] font-medium text-violet-700">Lead tiers</p>
+            <p className="mt-1 text-sm font-semibold text-zinc-900">
+              <span className="text-red-600">{data?.kpis.tiers.hot ?? 0} hot</span>
+              <span className="mx-1 text-zinc-300">·</span>
+              <span className="text-amber-600">{data?.kpis.tiers.warm ?? 0} warm</span>
+              <span className="mx-1 text-zinc-300">·</span>
+              <span className="text-zinc-500">{data?.kpis.tiers.cold ?? 0} cold</span>
+            </p>
+          </div>
+          <div className="rounded-xl bg-amber-50/60 p-3">
+            <p className="text-[11px] font-medium text-amber-700">Money gates awaiting you</p>
+            <p className="mt-1 text-xl font-bold tracking-tight text-zinc-900">
+              {data?.kpis.moneyGatesAwaiting ?? 0}
+            </p>
+          </div>
+        </div>
+        {data && data.kpis.avgStageDwell.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {data.kpis.avgStageDwell.map((s) => (
+              <span
+                key={s.stage}
+                className={`rounded-lg px-2.5 py-1 text-xs font-medium ${
+                  s.avgDays > 14 ? "bg-red-50 text-red-700" : s.avgDays > 7 ? "bg-amber-50 text-amber-700" : "bg-zinc-100 text-zinc-600"
+                }`}
+              >
+                {s.stage}: {s.avgDays}d avg
+              </span>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">

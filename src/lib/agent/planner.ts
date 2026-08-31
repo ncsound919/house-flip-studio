@@ -59,6 +59,24 @@ export interface PlannerContractor {
   license_number: string | null;
   insurance_expiry: string | null;
   verified_at: string | null;
+  license_checked_at: string | null;
+}
+
+export interface PlannerRfqDraft {
+  id: string;
+  deal_id: string;
+  contractor_id: string;
+}
+
+export interface PlannerPendingGate {
+  dealId: string;
+  kind: string; // AgentActionKind as string
+  to?: string; // advance_stage target, when known
+}
+
+export interface PlannerRecentChase {
+  contractorId: string | null;
+  at: string;
 }
 
 export interface PlannerState {
@@ -67,6 +85,14 @@ export interface PlannerState {
   documents: PlannerDocument[];
   rehabItems: PlannerRehabItem[];
   contractors: PlannerContractor[];
+  rfqDrafts: PlannerRfqDraft[];
+  // Money-gate actions already awaiting approval (dedup — never stack two
+  // identical pending gates, and never re-emit what the operator hasn't acted on).
+  pendingGates: PlannerPendingGate[];
+  // Recent chase_document actions (cooldown so contractors aren't emailed daily).
+  recentChases: PlannerRecentChase[];
+  // Map of dealId → real comps entered for that deal (sale prices).
+  comps: Record<string, Array<{ sale_price: number | null }>>;
   // Map of dealId → {hasUnderwriting, max_offer, projected_profit, passes_70_rule}
   underwritings: Record<
     string,
@@ -105,19 +131,21 @@ function planForLead(deal: PlannerDeal, state: PlannerState, out: PlannedAction[
       county: deal.city ? deriveCountyFromCity(deal.city) : "default",
       assessedValue: deal.assessed_value,
       sqft: deal.sqft,
+      comps: state.comps[deal.id],
     });
     if (est.arv != null) {
       out.push({
         kind: "arv_estimate",
         dealId: deal.id,
         title: `Estimate ARV for ${deal.address}`,
-        detail: `Heuristic ${est.source} → ${money(est.arv)} (${est.confidence} confidence). ${est.disclaimer}`,
+        detail: `${est.source === "comps" ? "Real comps" : "Heuristic"} ${est.source} → ${money(est.arv)} (${est.confidence} confidence). ${est.disclaimer}`,
         requires_approval: false,
         metadata: {
           arv: est.arv,
           source: est.source,
           confidence: est.confidence,
           signals: est.signals,
+          compCount: (state.comps[deal.id] ?? []).length,
         },
       });
     } else {
@@ -164,7 +192,38 @@ function planForLead(deal: PlannerDeal, state: PlannerState, out: PlannedAction[
   }
 }
 
+function promptForCompsIfMissing(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
+  // Real comps upgrade ARV from heuristic to comp-based. If the deal already has
+  // an ARV but it wasn't comp-derived and fewer than 2 comps are on file, ask.
+  if (deal.arv_estimate != null && deal.arv_method !== "comps") {
+    const compCount = (state.comps[deal.id] ?? []).length;
+    if (compCount < 2) {
+      out.push({
+        kind: "info",
+        dealId: deal.id,
+        title: `Add ${2 - compCount} comp${2 - compCount === 1 ? "" : "s"} for ${deal.address}`,
+        detail: `ARV is ${deal.arv_method ?? "heuristic"} (${money(deal.arv_estimate)}). Adding at least 2 real comps lets underwriting run on a comp-based ARV.`,
+        requires_approval: false,
+        metadata: { reason: "comps_missing", compCount },
+      });
+    }
+  }
+}
+
 function planForInspecting(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
+  // Draft a rehab scope early so budget planning can start before Rehab.
+  const hasScope = state.rehabItems.some((r) => r.deal_id === deal.id);
+  if (!hasScope) {
+    out.push({
+      kind: "generate_scope",
+      dealId: deal.id,
+      title: `Draft rehab scope for ${deal.address}`,
+      detail: "No rehab scope on file. Agent will draft estimated line items (reviewable).",
+      requires_approval: false,
+      metadata: { note: "Deterministic costs; LLM-polished descriptions when enabled" },
+    });
+  }
+  promptForCompsIfMissing(deal, state, out);
   // If underwriting exists and passes, advance to Underwriting. NOT a money gate.
   const uw = state.underwritings[deal.id];
   if (uw && uw.passes_70_rule === true) {
@@ -190,9 +249,23 @@ function planForInspecting(deal: PlannerDeal, state: PlannerState, out: PlannedA
 }
 
 function planForUnderwriting(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
+  // Draft a rehab scope if not already present (used for offer/rehab planning).
+  const hasScope = state.rehabItems.some((r) => r.deal_id === deal.id);
+  if (!hasScope) {
+    out.push({
+      kind: "generate_scope",
+      dealId: deal.id,
+      title: `Draft rehab scope for ${deal.address}`,
+      detail: "No rehab scope on file. Draft line items so underwriting can include real rehab estimates.",
+      requires_approval: false,
+      metadata: { note: "Deterministic costs; LLM-polished descriptions when enabled" },
+    });
+  }
+  promptForCompsIfMissing(deal, state, out);
   // Money gate: making an offer. The agent DRAFTS the advance but does NOT execute.
+  // Never stack a second pending gate if one already awaits approval.
   const uw = state.underwritings[deal.id];
-  if (uw && uw.passes_70_rule === true) {
+  if (uw && uw.passes_70_rule === true && !hasPendingGate(state, deal.id, "advance_stage", "Offer Made")) {
     out.push({
       kind: "advance_stage",
       dealId: deal.id,
@@ -216,8 +289,9 @@ function planForUnderwriting(deal: PlannerDeal, state: PlannerState, out: Planne
   }
 }
 
-function planForOfferMade(deal: PlannerDeal, out: PlannedAction[]) {
+function planForOfferMade(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
   // Money gate: signing a contract / committing earnest money.
+  if (hasPendingGate(state, deal.id, "advance_stage", "Under Contract")) return;
   out.push({
     kind: "advance_stage",
     dealId: deal.id,
@@ -237,6 +311,7 @@ function planForUnderContract(
   // Request the standard contract document.
   requestDocumentIfMissing(deal, "signed_contract", state, out);
   // Money gate: starting rehab = beginning to spend.
+  if (hasPendingGate(state, deal.id, "advance_stage", "Rehab")) return;
   out.push({
     kind: "advance_stage",
     dealId: deal.id,
@@ -255,40 +330,13 @@ function planForRehab(deal: PlannerDeal, state: PlannerState, out: PlannedAction
   }
   // Chase any doc that's been requested > 7 days and is still missing/received.
   chaseOverdueDocuments(deal, state, out);
-  // Verify contractor licenses on first sight (or refresh every 30d).
-  for (const c of state.contractors) {
-    if (c.license_number && (!c.verified_at || stale(c.verified_at, 30))) {
-      out.push({
-        kind: "verify_contractor",
-        contractorId: c.id,
-        dealId: deal.id,
-        title: `Verify license for ${c.name}`,
-        detail: c.verified_at
-          ? `Last verified ${daysAgo(c.verified_at)}d ago — refresh against nclbgc.`
-          : "No prior verification on file.",
-        requires_approval: false,
-        metadata: { license_number: c.license_number },
-      });
-    }
-    // Insurance expiring within 30 days → chase email to the contractor.
-    if (c.insurance_expiry) {
-      const d = daysUntil(c.insurance_expiry);
-      if (d != null && d <= 30 && d > 0) {
-        out.push({
-          kind: "chase_document",
-          dealId: deal.id,
-          contractorId: c.id,
-          title: `Ask ${c.name} for updated insurance cert`,
-          detail: `Current policy expires in ${d} day${d === 1 ? "" : "s"}.`,
-          requires_approval: false,
-          metadata: { reason: "insurance_expiring", expiry: c.insurance_expiry },
-        });
-      }
-    }
-  }
   // If all rehab items completed, advance to Listed.
   const items = state.rehabItems.filter((r) => r.deal_id === deal.id);
-  if (items.length > 0 && items.every((r) => r.status === "completed")) {
+  if (
+    items.length > 0 &&
+    items.every((r) => r.status === "completed") &&
+    !hasPendingGate(state, deal.id, "advance_stage", "Listed")
+  ) {
     out.push({
       kind: "advance_stage",
       dealId: deal.id,
@@ -299,10 +347,33 @@ function planForRehab(deal: PlannerDeal, state: PlannerState, out: PlannedAction
       approval: { dealId: deal.id, toStage: "Listed" },
     });
   }
+
+  // Draft RFQs for verified contractors on this deal with real scope to price.
+  // Draft-only (requires_approval: false); the send stays money-gated.
+  if (items.length > 0) {
+    for (const c of state.contractors) {
+      if (!c.verified_at || !c.trade) continue;
+      const alreadyDrafted = state.rfqDrafts.some(
+        (d) => d.deal_id === deal.id && d.contractor_id === c.id
+      );
+      if (alreadyDrafted) continue;
+      const itemCount = items.length;
+      out.push({
+        kind: "draft_rfq",
+        dealId: deal.id,
+        contractorId: c.id,
+        title: `Draft RFQ for ${c.name} (${c.trade}) on ${deal.address}`,
+        detail: `${itemCount} rehab item${itemCount === 1 ? "" : "s"} ready to price. Draft saved for review; sending requires approval.`,
+        requires_approval: false,
+        metadata: { rehabItemIds: items.map((i) => i.id) },
+      });
+    }
+  }
 }
 
-function planForListed(deal: PlannerDeal, out: PlannedAction[]) {
+function planForListed(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
   // Money gate: closing the sale.
+  if (hasPendingGate(state, deal.id, "advance_stage", "Closed")) return;
   out.push({
     kind: "advance_stage",
     dealId: deal.id,
@@ -315,6 +386,68 @@ function planForListed(deal: PlannerDeal, out: PlannedAction[]) {
 }
 
 // --- Helpers -----------------------------------------------------------------
+
+function hasPendingGate(
+  state: PlannerState,
+  dealId: string,
+  kind: AgentActionKind,
+  to: string
+): boolean {
+  return state.pendingGates.some(
+    (g) => g.dealId === dealId && g.kind === kind && (g.to == null || g.to === to)
+  );
+}
+
+// Contractor-level oversight, run once per cycle (not once per deal) so a
+// contractor with N Rehab deals never gets N verify/chase actions in a run.
+function planContractorOversight(state: PlannerState, out: PlannedAction[]) {
+  for (const c of state.contractors) {
+    // License verification: first sight, 24h cooldown after a failed check,
+    // or 30d refresh for previously-verified ones. Never hammers nclbgc.
+    if (c.license_number) {
+      const verified = Boolean(c.verified_at);
+      const checkedRecently = c.license_checked_at != null && daysAgo(c.license_checked_at) < 1;
+      const needsFirstCheck = !verified && !checkedRecently;
+      const needsRefresh = verified && stale(c.verified_at!, 30);
+      if (needsFirstCheck || needsRefresh) {
+        out.push({
+          kind: "verify_contractor",
+          contractorId: c.id,
+          title: `Verify license for ${c.name}`,
+          detail: verified
+            ? `Last verified ${daysAgo(c.verified_at!)}d ago — refresh against nclbgc.`
+            : checkedRecently
+            ? `Previous check did not verify (checked ${daysAgo(c.license_checked_at!)}d ago).`
+            : "No prior verification on file.",
+          requires_approval: false,
+          metadata: { license_number: c.license_number },
+        });
+      }
+    }
+    // Insurance expiring within 30 days → chase email. Cooldown: only re-chase
+    // if we haven't already chased this contractor within the last 7 days.
+    if (c.insurance_expiry) {
+      const d = daysUntil(c.insurance_expiry);
+      if (d != null && d <= 30 && d > 0 && !chasedRecently(state, c.id)) {
+        out.push({
+          kind: "chase_document",
+          contractorId: c.id,
+          title: `Ask ${c.name} for updated insurance cert`,
+          detail: `Current policy expires in ${d} day${d === 1 ? "" : "s"}.`,
+          requires_approval: false,
+          metadata: { reason: "insurance_expiring", expiry: c.insurance_expiry },
+        });
+      }
+    }
+  }
+}
+
+function chasedRecently(state: PlannerState, contractorId: string, withinDays = 7): boolean {
+  const cutoff = Date.now() - withinDays * 86_400_000;
+  return state.recentChases.some(
+    (c) => c.contractorId === contractorId && new Date(c.at).getTime() >= cutoff
+  );
+}
 
 function requestDocumentIfMissing(
   deal: PlannerDeal,
@@ -405,7 +538,7 @@ export function planAgentActions(state: PlannerState): PlannedAction[] {
         planForUnderwriting(deal, state, out);
         break;
       case "Offer Made":
-        planForOfferMade(deal, out);
+        planForOfferMade(deal, state, out);
         break;
       case "Under Contract":
         planForUnderContract(deal, state, out);
@@ -414,10 +547,12 @@ export function planAgentActions(state: PlannerState): PlannedAction[] {
         planForRehab(deal, state, out);
         break;
       case "Listed":
-        planForListed(deal, out);
+        planForListed(deal, state, out);
         break;
     }
   }
+  // Contractor oversight is org-wide and run once per cycle.
+  planContractorOversight(state, out);
   return out;
 }
 

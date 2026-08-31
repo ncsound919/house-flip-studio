@@ -3,6 +3,10 @@ import { calculateUnderwriting } from "@/lib/underwriting";
 import { huntLeads } from "@/lib/leadHunt";
 import { DEAL_STAGES } from "@/lib/types";
 import { sendEmail } from "./email";
+import { getOrgSettings, underwritingFor, type OrgSettings } from "@/lib/orgSettings";
+import { verifyContractor } from "@/lib/contractorVerification";
+import { buildDeterministicRfq } from "@/lib/rfqBuilder";
+import { generateScopeForDeal } from "@/lib/agent/scope";
 import {
   planAgentActions,
   type PlannedAction,
@@ -11,6 +15,7 @@ import {
   type PlannerDocument,
   type PlannerRehabItem,
   type PlannerContractor,
+  type PlannerRfqDraft,
 } from "./planner";
 import type {
   AgentRunTrigger,
@@ -51,9 +56,40 @@ export async function runAgentCycle(opts: RunOptions): Promise<RunResult> {
   const admin = createAdminClient();
   const errors: string[] = [];
 
+  // Mutual exclusion: never run two cycles for the same org concurrently
+  // (manual "Run now" can overlap the scheduled cron). A run still marked
+  // "running" older than 30 minutes is treated as a crashed cycle and taken over.
+  const { data: recent } = await admin
+    .from("agent_runs")
+    .select("id, status, started_at")
+    .eq("org_id", opts.orgId)
+    .order("started_at", { ascending: false })
+    .limit(1);
+  const lastRunRow = (recent ?? [])[0] as { id: string; status: string; started_at: string } | undefined;
+  if (
+    lastRunRow?.status === "running" &&
+    lastRunRow.started_at &&
+    Date.now() - new Date(lastRunRow.started_at).getTime() < 30 * 60_000
+  ) {
+    const skipped = await admin
+      .from("agent_runs")
+      .insert({ org_id: opts.orgId, trigger: opts.trigger, status: "skipped", summary: { skipped: "another cycle in progress", inProgressRunId: lastRunRow.id } })
+      .select("id")
+      .single();
+    const skippedId = (skipped.data as { id?: string } | null)?.id ?? "";
+    return {
+      runId: skippedId,
+      actions: 0,
+      moneyGatesAwaiting: 0,
+      errors: ["skipped: agent cycle already in progress"],
+    };
+  }
+
+  // Insert with status "running" so a crashed/killed run is never falsely shown
+  // as completed. Finalized to completed/partial/failed at the end.
   const { data: run, error: runErr } = await admin
     .from("agent_runs")
-    .insert({ org_id: opts.orgId, trigger: opts.trigger, status: "completed" })
+    .insert({ org_id: opts.orgId, trigger: opts.trigger, status: "running" as AgentRunStatus })
     .select("id")
     .single();
   if (runErr || !run) {
@@ -64,49 +100,97 @@ export async function runAgentCycle(opts: RunOptions): Promise<RunResult> {
   let moneyGatesAwaiting = 0;
   let actionCount = 0;
 
+  // Operator settings gate what the cycle is allowed to do.
+  const settings = await getOrgSettings(opts.orgId);
+
   try {
-    // 1) Lead hunt first — the agent is self-feeding.
-    try {
-      const hunt = await huntLeads({ orgId: opts.orgId, statewide: true, maxTotal: 100 });
+    // 0) Global kill-switch: agent.enabled=false disables the whole cycle, not
+    //    just the hunt. Honest audit trail so the run is documented, not skipped.
+    if (!settings.agent.enabled) {
       await recordAction(
         admin,
         runId,
         opts.orgId,
         {
-          kind: "hunt_leads",
-          title: "Lead hunt (statewide)",
-          detail: `Scanned ${hunt.scanned}, new ${hunt.newLeads}, duplicates ${hunt.duplicates}. Tiers: ${JSON.stringify(hunt.tiers)}.${hunt.warnings.length ? ` Warnings: ${hunt.warnings.join(" | ")}` : ""}`,
+          kind: "info",
+          title: "Agent cycle disabled by settings",
+          detail: "agent.enabled is false — no hunt, planning, or actions taken this run.",
           requires_approval: false,
-          metadata: {
-            scanned: hunt.scanned,
-            newLeads: hunt.newLeads,
-            duplicates: hunt.duplicates,
-            tiers: hunt.tiers,
-            warnings: hunt.warnings,
+          metadata: { reason: "agent_disabled" },
+        },
+        "skipped",
+        {}
+      );
+      actionCount++;
+      const summary = {
+        actions: actionCount,
+        moneyGatesAwaiting: 0,
+        errors: 0,
+        finishedAt: new Date().toISOString(),
+      };
+      await admin
+        .from("agent_runs")
+        .update({
+          status: "completed" as AgentRunStatus,
+          summary,
+          finished_at: new Date().toISOString(),
+        })
+        .eq("id", runId);
+      return { runId, actions: actionCount, moneyGatesAwaiting: 0, errors };
+    }
+
+    // 1) Lead hunt first — the agent is self-feeding (honors the org's flip
+    //    profile: statewide vs county list).
+    const fp = settings.flipProfile;
+    if (settings.agent.huntOnCycle && (fp.statewide || fp.counties.length > 0)) {
+      try {
+        const hunt = await huntLeads({
+          orgId: opts.orgId,
+          statewide: fp.statewide,
+          counties: fp.counties,
+          maxTotal: settings.agent.maxHuntPerCycle,
+          settings,
+        });
+        await recordAction(
+          admin,
+          runId,
+          opts.orgId,
+          {
+            kind: "hunt_leads",
+            title: "Lead hunt (statewide)",
+            detail: `Scanned ${hunt.scanned}, new ${hunt.newLeads}, duplicates ${hunt.duplicates}. Tiers: ${JSON.stringify(hunt.tiers)}.${hunt.warnings.length ? ` Warnings: ${hunt.warnings.join(" | ")}` : ""}`,
+            requires_approval: false,
+            metadata: {
+              scanned: hunt.scanned,
+              newLeads: hunt.newLeads,
+              duplicates: hunt.duplicates,
+              tiers: hunt.tiers,
+              warnings: hunt.warnings,
+            },
           },
-        },
-        "done",
-        { hunt }
-      );
-      actionCount++;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "hunt failed";
-      errors.push(`Lead hunt: ${msg}`);
-      await recordAction(
-        admin,
-        runId,
-        opts.orgId,
-        {
-          kind: "hunt_leads",
-          title: "Lead hunt failed",
-          detail: msg,
-          requires_approval: false,
-          metadata: {},
-        },
-        "failed",
-        { error: msg }
-      );
-      actionCount++;
+          "done",
+          { hunt }
+        );
+        actionCount++;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "hunt failed";
+        errors.push(`Lead hunt: ${msg}`);
+        await recordAction(
+          admin,
+          runId,
+          opts.orgId,
+          {
+            kind: "hunt_leads",
+            title: "Lead hunt failed",
+            detail: msg,
+            requires_approval: false,
+            metadata: {},
+          },
+          "failed",
+          { error: msg }
+        );
+        actionCount++;
+      }
     }
 
     // 2) Plan + execute across all deals.
@@ -117,6 +201,7 @@ export async function runAgentCycle(opts: RunOptions): Promise<RunResult> {
       try {
         const { status, reason } = await executeStep(admin, opts.orgId, runId, step, {
           executeMoneyActions: !!opts.executeMoneyActions,
+          settings,
         });
         actionCount++;
         if (step.requires_approval && status === "pending_approval") {
@@ -167,7 +252,7 @@ async function executeStep(
   orgId: string,
   runId: string,
   step: PlannedAction,
-  policy: { executeMoneyActions: boolean }
+  policy: { executeMoneyActions: boolean; settings: OrgSettings }
 ): Promise<{ status: AgentActionStatus; reason?: string }> {
   // Money gate: never execute unless caller explicitly authorized.
   if (step.requires_approval && !policy.executeMoneyActions) {
@@ -179,7 +264,7 @@ async function executeStep(
     case "arv_estimate":
       return await applyArvEstimate(admin, runId, orgId, step);
     case "underwrite":
-      return await applyUnderwrite(admin, runId, orgId, step);
+      return await applyUnderwrite(admin, runId, orgId, step, policy.settings);
     case "advance_stage":
       return await applyAdvanceStage(admin, runId, orgId, step);
     case "generate_document":
@@ -188,6 +273,8 @@ async function executeStep(
       return await applyChaseDocument(admin, runId, orgId, step);
     case "verify_contractor":
       return await applyVerifyContractor(admin, runId, orgId, step);
+    case "generate_scope":
+      return await applyGenerateScope(admin, runId, orgId, step, policy.settings);
     case "draft_rfq":
       return await applyDraftRfq(admin, runId, orgId, step);
     case "send_rfq":
@@ -231,7 +318,8 @@ async function applyUnderwrite(
   admin: ReturnType<typeof createAdminClient>,
   runId: string,
   orgId: string,
-  step: PlannedAction
+  step: PlannedAction,
+  settings: OrgSettings
 ): ExecResult {
   if (!step.dealId) return { status: "skipped", reason: "no dealId" };
   const arv = step.metadata.arv as number | undefined;
@@ -239,49 +327,49 @@ async function applyUnderwrite(
   if (arv == null || asking == null) {
     return { status: "skipped", reason: "missing arv or asking" };
   }
-  // Heuristic rehab estimate: 40/sqft or the existing arv_estimate's confidence
-  // from the deal. Use a safe default if sqft unknown.
+  const uw = underwritingFor(settings);
+  // Heuristic rehab estimate: settings.rehabPerSqft or a safe % of ARV when sqft unknown.
   const { data: deal } = await admin
     .from("deals")
     .select("sqft")
     .eq("id", step.dealId)
     .single();
   const sqft = Number((deal as { sqft?: number } | null)?.sqft) || 0;
-  const rehab = sqft > 0 ? sqft * 40 : Math.round(arv * 0.18);
-  const uw = calculateUnderwriting({
+  const rehab = sqft > 0 ? sqft * uw.rehabPerSqft : Math.round(arv * 0.18);
+  const calc = calculateUnderwriting({
     arv,
     rehabEstimate: rehab,
     purchasePrice: asking,
-    holdingMonths: 6,
-    downPaymentPct: 20,
-    interestRate: 10,
-    loanPoints: 0,
+    holdingMonths: uw.holdingMonths,
+    downPaymentPct: uw.downPaymentPct,
+    interestRate: uw.interestRate,
+    loanPoints: uw.loanPoints,
   });
   const row = {
     deal_id: step.dealId,
     arv,
     rehab_estimate: rehab,
     purchase_price: asking,
-    max_offer: uw.maxOffer,
-    final_purchase_price: uw.finalPurchasePrice,
-    passes_70_rule: uw.passes70Rule,
-    acquisition_costs: uw.acquisitionCosts,
-    holding_costs: uw.holdingCosts,
-    selling_costs: uw.sellingCosts,
-    financing_costs: uw.financingCosts,
-    total_project_cost: uw.totalProjectCost,
-    projected_profit: uw.projectedProfit,
-    roi: uw.roi,
-    cash_on_cash: uw.cashOnCash,
-    down_payment_amount: uw.downPaymentAmount,
-    loan_amount: uw.loanAmount,
+    max_offer: calc.maxOffer,
+    final_purchase_price: calc.finalPurchasePrice,
+    passes_70_rule: calc.passes70Rule,
+    acquisition_costs: calc.acquisitionCosts,
+    holding_costs: calc.holdingCosts,
+    selling_costs: calc.sellingCosts,
+    financing_costs: calc.financingCosts,
+    total_project_cost: calc.totalProjectCost,
+    projected_profit: calc.projectedProfit,
+    roi: calc.roi,
+    cash_on_cash: calc.cashOnCash,
+    down_payment_amount: calc.downPaymentAmount,
+    loan_amount: calc.loanAmount,
     updated_at: new Date().toISOString(),
   };
   const { error } = await admin
     .from("underwriting")
     .upsert(row, { onConflict: "deal_id" });
   if (error) return { status: "failed", reason: error.message };
-  await recordAction(admin, runId, orgId, step, "done", { uw });
+  await recordAction(admin, runId, orgId, step, "done", { calc });
   return { status: "done" };
 }
 
@@ -296,8 +384,27 @@ async function applyAdvanceStage(
     return { status: "skipped", reason: `unknown target stage: ${to}` };
   }
   if (!step.dealId) return { status: "skipped", reason: "no dealId" };
-  // Only execute the advance if the planner said it's non-money. Money-gated
-  // calls are intercepted earlier in executeStep().
+  // Re-validate against the live stage: the plan is a snapshot, and a deal the
+  // operator moved or closed mid-run must not be overwritten or regressed.
+  const { data: live } = await admin
+    .from("deals")
+    .select("stage")
+    .eq("id", step.dealId)
+    .single();
+  const currentStage = (live as { stage?: string } | null)?.stage;
+  if (currentStage) {
+    const fromIdx = DEAL_STAGES.indexOf(currentStage as (typeof DEAL_STAGES)[number]);
+    const toIdx = DEAL_STAGES.indexOf(to as (typeof DEAL_STAGES)[number]);
+    // Covers already-at-target (idempotent no-op) and regressions (e.g. a deal
+    // the operator moved to Rehab must not be pulled back to Under Contract).
+    if (fromIdx >= toIdx) {
+      await recordAction(admin, runId, orgId, step, "skipped", {
+        reason: `deal already at/after ${to} (current ${currentStage})`,
+        currentStage,
+      });
+      return { status: "skipped", reason: `deal already at/after ${to}` };
+    }
+  }
   const { error } = await admin
     .from("deals")
     .update({ stage: to, stage_changed_at: new Date().toISOString() })
@@ -377,16 +484,16 @@ async function applyVerifyContractor(
   step: PlannedAction
 ): ExecResult {
   if (!step.contractorId) return { status: "skipped", reason: "no contractorId" };
-  // The existing verify-license route is a POST handler. The planner/runner
-  // is server-side; we just update verified_at so the run records intent.
-  // The route still does the actual nclbgc lookup on demand.
-  const { error } = await admin
-    .from("contractors")
-    .update({ verified_at: new Date().toISOString() })
-    .eq("id", step.contractorId);
-  if (error) return { status: "failed", reason: error.message };
-  await recordAction(admin, runId, orgId, step, "done", { verified_at: "stamped" });
-  return { status: "done" };
+  const result = await verifyContractor(admin, orgId, step.contractorId);
+  await recordAction(admin, runId, orgId, step, result.verified ? "done" : "failed", {
+    verified: result.verified,
+    detail: result.detail,
+    licenseTier: result.licenseTier,
+    checkedAt: result.checkedAt,
+  });
+  return result.verified
+    ? { status: "done" }
+    : { status: "failed", reason: result.detail ?? "license not verified" };
 }
 
 async function applyDraftRfq(
@@ -395,12 +502,114 @@ async function applyDraftRfq(
   orgId: string,
   step: PlannedAction
 ): ExecResult {
-  // Draft-only. The actual send is money-gated and lives behind /api/contractors/generate-rfq.
-  // We record a draft placeholder here; the operator clicks "Generate RFQ" on the deal.
-  await recordAction(admin, runId, orgId, step, "skipped", {
-    reason: "rfq draft — open the deal to generate and review before sending",
+  if (!step.dealId || !step.contractorId) {
+    return { status: "skipped", reason: "no dealId or contractorId" };
+  }
+
+  const [{ data: deal }, { data: contractor }, { data: items }] = await Promise.all([
+    admin.from("deals").select("id, org_id, address, city, state, zip").eq("id", step.dealId).single(),
+    admin.from("contractors").select("id, org_id, name, trade").eq("id", step.contractorId).single(),
+    admin
+      .from("rehab_items")
+      .select("id, deal_id, org_id, trade, description, estimated_cost")
+      .eq("deal_id", step.dealId)
+      .eq("org_id", orgId),
+  ]);
+
+  if (!deal || !contractor) return { status: "skipped", reason: "deal or contractor missing" };
+  if (deal.org_id !== orgId || contractor.org_id !== orgId) {
+    return { status: "skipped", reason: "org mismatch" };
+  }
+  const itemsOrg = (items ?? []).filter((r: { org_id: string }) => r.org_id === orgId);
+
+  const addressParts = [deal.address, [deal.city, deal.state].filter(Boolean).join(", "), deal.zip].filter(Boolean);
+  const addressLine = addressParts.join(" ").replace(/\s+/g, " ").trim() || deal.address;
+
+  const { data: existing } = await admin
+    .from("rfq_drafts")
+    .select("id")
+    .eq("deal_id", step.dealId)
+    .eq("contractor_id", step.contractorId)
+    .limit(1);
+  if (existing && existing.length > 0) {
+    await recordAction(admin, runId, orgId, step, "skipped", { reason: "rfq draft already exists" });
+    return { status: "skipped", reason: "rfq draft already exists" };
+  }
+
+  const draft_text = buildDeterministicRfq({
+    contractorName: contractor.name,
+    contractorTrade: contractor.trade ?? "contractor",
+    address: addressLine,
+    scopeLines: itemsOrg.map((r: { trade: string | null; description: string; estimated_cost: number }) => ({
+      trade: r.trade,
+      description: r.description,
+      estimatedCost: Number(r.estimated_cost) || 0,
+    })),
   });
-  return { status: "skipped" };
+
+  const { error } = await admin.from("rfq_drafts").insert({
+    org_id: orgId,
+    deal_id: step.dealId,
+    contractor_id: step.contractorId,
+    rehab_item_ids: itemsOrg.map((r: { id: string }) => r.id),
+    draft_text,
+    status: "draft",
+  });
+  if (error) return { status: "failed", reason: error.message };
+
+  await recordAction(admin, runId, orgId, step, "done", {
+    address: addressLine,
+    scopeItemCount: itemsOrg.length,
+  });
+  return { status: "done" };
+}
+
+async function applyGenerateScope(
+  admin: ReturnType<typeof createAdminClient>,
+  runId: string,
+  orgId: string,
+  step: PlannedAction,
+  settings: OrgSettings
+): ExecResult {
+  if (!step.dealId) return { status: "skipped", reason: "no dealId" };
+  const { data: deal } = await admin
+    .from("deals")
+    .select("id, org_id, address, city, sqft, year_built")
+    .eq("id", step.dealId)
+    .single();
+  if (!deal || deal.org_id !== orgId) return { status: "skipped", reason: "deal missing or org mismatch" };
+  const scope = await generateScopeForDeal(deal, settings);
+  // Insert all-or-nothing: if any line fails midway, roll back the ones already
+  // inserted so the deal is never left with a partial scope (which would stop
+  // the planner from regenerating it).
+  const insertedIds: string[] = [];
+  for (const line of scope.lines) {
+    const { data, error } = await admin
+      .from("rehab_items")
+      .insert({
+        org_id: orgId,
+        deal_id: step.dealId,
+        trade: line.trade,
+        description: line.description,
+        estimated_cost: line.estimated_cost,
+        status: "estimated",
+      })
+      .select("id");
+    if (error) {
+      if (insertedIds.length > 0) {
+        await admin.from("rehab_items").delete().in("id", insertedIds);
+      }
+      return { status: "failed", reason: error.message };
+    }
+    const row = (data ?? [])[0] as { id?: string } | undefined;
+    if (row?.id) insertedIds.push(row.id);
+  }
+  await recordAction(admin, runId, orgId, step, "done", {
+    source: scope.source,
+    items: scope.lines.length,
+    notes: scope.notes,
+  });
+  return { status: "done" };
 }
 
 // --- Audit log ---------------------------------------------------------------
@@ -433,22 +642,44 @@ async function loadPlannerState(
   admin: ReturnType<typeof createAdminClient>,
   orgId: string
 ): Promise<PlannerState> {
-  const [{ data: deals }, { data: documents }, { data: rehabItems }, { data: contractors }, { data: uws }] =
+  const deals = await admin
+    .from("deals")
+    .select(
+      "id, org_id, address, city, stage, asking_price, sqft, year_built, assessed_value, arv_estimate, arv_method"
+    )
+    .eq("org_id", orgId)
+    .neq("stage", "Closed");
+  const dealIds = ((deals.data ?? []) as Array<{ id: string }>).map((d) => d.id);
+
+  const [{ data: documents }, { data: rehabItems }, { data: contractors }, { data: uws }, { data: rfqDrafts }, { data: comps }, { data: pendingGates }, { data: recentChases }] =
     await Promise.all([
-      admin
-        .from("deals")
-        .select(
-          "id, org_id, address, city, stage, asking_price, sqft, year_built, assessed_value, arv_estimate, arv_method"
-        )
-        .eq("org_id", orgId)
-        .neq("stage", "Closed"),
       admin.from("documents").select("id, deal_id, rehab_item_id, doc_type, status, requested_at").eq("org_id", orgId),
       admin.from("rehab_items").select("id, deal_id, trade, status").eq("org_id", orgId),
       admin
         .from("contractors")
-        .select("id, org_id, name, email, trade, license_number, insurance_expiry, verified_at")
+        .select("id, org_id, name, email, trade, license_number, insurance_expiry, verified_at, license_checked_at")
         .eq("org_id", orgId),
-      admin.from("underwriting").select("deal_id, arv, max_offer, projected_profit, passes_70_rule"),
+      // underwriting and comps have no org_id — scope by the org's own deal ids
+      // so we never pull cross-tenant rows into the planner snapshot.
+      dealIds.length > 0
+        ? admin.from("underwriting").select("deal_id, arv, max_offer, projected_profit, passes_70_rule").in("deal_id", dealIds)
+        : Promise.resolve({ data: [], error: null }),
+      admin.from("rfq_drafts").select("id, deal_id, contractor_id").eq("org_id", orgId),
+      dealIds.length > 0
+        ? admin.from("comps").select("deal_id, sale_price").in("deal_id", dealIds)
+        : Promise.resolve({ data: [], error: null }),
+      admin
+        .from("agent_actions")
+        .select("deal_id, action_type, metadata")
+        .eq("org_id", orgId)
+        .eq("requires_approval", true)
+        .eq("status", "pending_approval"),
+      admin
+        .from("agent_actions")
+        .select("contractor_id, created_at")
+        .eq("org_id", orgId)
+        .eq("action_type", "chase_document")
+        .gte("created_at", new Date(Date.now() - 7 * 86_400_000).toISOString()),
     ]);
 
   const underwritings: PlannerState["underwritings"] = {};
@@ -467,12 +698,39 @@ async function loadPlannerState(
     };
   }
 
+  const compsByDeal: PlannerState["comps"] = {};
+  for (const c of (comps ?? []) as Array<{ deal_id: string; sale_price: number | null }>) {
+    if (!compsByDeal[c.deal_id]) compsByDeal[c.deal_id] = [];
+    compsByDeal[c.deal_id].push({ sale_price: c.sale_price });
+  }
+
+  const pendingGatesList: PlannerState["pendingGates"] = ((pendingGates ?? []) as Array<{
+    deal_id: string | null;
+    action_type: string;
+    metadata?: Record<string, unknown> | null;
+  }>)
+    .filter((g) => g.deal_id != null)
+    .map((g) => ({
+      dealId: g.deal_id as string,
+      kind: g.action_type,
+      to: (g.metadata?.to as string | undefined) ?? undefined,
+    }));
+
+  const recentChasesList: PlannerState["recentChases"] = ((recentChases ?? []) as Array<{
+    contractor_id: string | null;
+    created_at: string;
+  }>).map((c) => ({ contractorId: c.contractor_id, at: c.created_at }));
+
   return {
     orgId,
-    deals: (deals ?? []) as PlannerDeal[],
+    deals: (deals.data ?? []) as PlannerDeal[],
     documents: (documents ?? []) as PlannerDocument[],
     rehabItems: (rehabItems ?? []) as PlannerRehabItem[],
     contractors: (contractors ?? []) as PlannerContractor[],
+    rfqDrafts: (rfqDrafts ?? []) as PlannerRfqDraft[],
+    pendingGates: pendingGatesList,
+    recentChases: recentChasesList,
+    comps: compsByDeal,
     underwritings,
   };
 }
@@ -484,13 +742,13 @@ export async function getAgentSummary(orgId: string): Promise<AgentRunSummary> {
   const [{ data: runs }, { data: actions }] = await Promise.all([
     admin
       .from("agent_runs")
-      .select("id, started_at, summary")
+      .select("id, started_at, status, summary")
       .eq("org_id", orgId)
       .order("started_at", { ascending: false })
       .limit(20),
     admin
       .from("agent_actions")
-      .select("id, action_type, status, requires_approval, approved_at")
+      .select("id, action_type, status, requires_approval, approved_at, metadata, detail")
       .eq("org_id", orgId)
       .order("created_at", { ascending: false })
       .limit(200),
@@ -498,26 +756,49 @@ export async function getAgentSummary(orgId: string): Promise<AgentRunSummary> {
 
   const byKind: Record<string, number> = {};
   const byStatus: Record<string, number> = {};
+  const byKindStatus: Record<string, Record<string, number>> = {};
+  const errorCounts: Record<string, number> = {};
   let moneyGatesAwaiting = 0;
   for (const a of (actions ?? []) as Array<{
     action_type: string;
     status: string;
     requires_approval: boolean;
     approved_at: string | null;
+    metadata?: Record<string, unknown> | null;
+    detail?: string | null;
   }>) {
     byKind[a.action_type] = (byKind[a.action_type] ?? 0) + 1;
     byStatus[a.status] = (byStatus[a.status] ?? 0) + 1;
+    byKindStatus[a.action_type] = byKindStatus[a.action_type] ?? {};
+    byKindStatus[a.action_type][a.status] = (byKindStatus[a.action_type][a.status] ?? 0) + 1;
     if (a.requires_approval && a.status === "pending_approval") {
       moneyGatesAwaiting++;
     }
+    if (a.status === "failed" || a.status === "blocked") {
+      const msg =
+        (a.metadata?.error as string) ?? (a.detail && a.detail !== "none" ? a.detail : null);
+      if (msg) {
+        const key = msg.slice(0, 120);
+        errorCounts[key] = (errorCounts[key] ?? 0) + 1;
+      }
+    }
   }
+  const topErrors = Object.entries(errorCounts)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 5)
+    .map(([message, count]) => ({ message, count }));
+
+  const lastRun = (runs ?? [])[0] as { started_at?: string; status?: string } | undefined;
   return {
     runs: (runs ?? []).length,
     actions: (actions ?? []).length,
     byKind,
     byStatus,
+    byKindStatus,
+    topErrors,
     moneyGatesAwaiting,
-    lastRunAt: ((runs ?? [])[0] as { started_at?: string } | undefined)?.started_at ?? null,
+    lastRunAt: lastRun?.started_at ?? null,
+    lastRunStatus: lastRun?.status ?? null,
   };
 }
 
@@ -550,6 +831,17 @@ export async function approveAgentAction(actionId: string, orgId: string): Promi
     const to = a.metadata?.to as string | undefined;
     if (!to || !DEAL_STAGES.includes(to as (typeof DEAL_STAGES)[number])) {
       return { ok: false, reason: "missing or invalid target stage" };
+    }
+    // Stale-approval guard: the operator may have moved the deal since this
+    // action was queued. Approving an old gate must never regress the deal.
+    const { data: live } = await admin.from("deals").select("stage").eq("id", a.deal_id).single();
+    const currentStage = (live as { stage?: string } | null)?.stage;
+    if (currentStage) {
+      const fromIdx = DEAL_STAGES.indexOf(currentStage as (typeof DEAL_STAGES)[number]);
+      const toIdx = DEAL_STAGES.indexOf(to as (typeof DEAL_STAGES)[number]);
+      if (fromIdx > toIdx) {
+        return { ok: false, reason: `stale — deal is already at ${currentStage}` };
+      }
     }
     const { error: upErr } = await admin
       .from("deals")

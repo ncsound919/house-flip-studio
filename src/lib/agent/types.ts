@@ -9,7 +9,7 @@
 
 export type AgentRunTrigger = "scheduled" | "manual";
 
-export type AgentRunStatus = "completed" | "failed" | "partial";
+export type AgentRunStatus = "running" | "completed" | "failed" | "partial" | "skipped";
 
 export type AgentActionKind =
   | "hunt_leads" // ran the lead hunt and ingested new leads
@@ -50,6 +50,10 @@ export interface AgentRunSummary {
   byStatus: Record<string, number>;
   moneyGatesAwaiting: number;
   lastRunAt: string | null;
+  lastRunStatus: string | null;
+  // action_type → status → count (success/failure telemetry).
+  byKindStatus?: Record<string, Record<string, number>>;
+  topErrors?: { message: string; count: number }[];
 }
 
 // Approval: the "execute now" payload recorded on a money-gate action.

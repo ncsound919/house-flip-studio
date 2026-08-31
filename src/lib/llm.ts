@@ -60,6 +60,7 @@ async function callModel(
       "HTTP-Referer": process.env.APP_URL || "http://localhost:3000",
       "X-Title": "NC-Flip-Studio",
     },
+    signal: AbortSignal.timeout(30_000),
     body: JSON.stringify({
       model,
       messages,

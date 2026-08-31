@@ -1,8 +1,9 @@
-import { fetchCountyParcels, FLIP_PROFILE } from "@/lib/listingSources/countyParcels";
+import { fetchCountyParcels } from "@/lib/listingSources/countyParcels";
 import { scoreLead } from "@/lib/leadScoring";
 import { scoreAndTier, tierForLead, tierLabel } from "@/lib/leadTier";
 import type { ListingCard } from "@/lib/listingSources/types";
 import { createAdminClient } from "@/lib/apiHelpers";
+import { DEFAULT_SETTINGS, type OrgSettings } from "@/lib/orgSettings";
 
 export interface HuntConfig {
   orgId: string;
@@ -14,6 +15,8 @@ export interface HuntConfig {
   // When statewide, this is the total cap on records scanned. ArcGIS returns
   // up to 1000 in one call, so we page to get a useful statewide sweep.
   maxTotal?: number;
+  // Operator settings. Falls back to hardcoded defaults when absent.
+  settings?: OrgSettings;
 }
 
 export interface HuntResult {
@@ -48,34 +51,45 @@ function normalizePin(pin: string | undefined): string | null {
   return cleaned.length >= 4 ? cleaned : null;
 }
 
-export async function scoreListings(county: string, listings: ListingCard[]): Promise<ScoredLead[]> {
-  return listings.map((l) => ({ ...l, score: scoreLead(l) }));
+export async function scoreListings(
+  county: string,
+  listings: ListingCard[],
+  flipProfile?: OrgSettings["flipProfile"]
+): Promise<ScoredLead[]> {
+  return listings.map((l) => ({ ...l, score: scoreLead(l, flipProfile) }));
 }
 
 // Page through NC OneMap statewide results (ArcGIS max 1000 per page, but we
 // keep a tight cap to stay under the 30s route limit).
-async function fetchStatewideParcels(max: number): Promise<ListingCard[]> {
-  const PAGE = 200;
+async function fetchStatewideParcels(
+  max: number,
+  flipProfile: OrgSettings["flipProfile"]
+): Promise<ListingCard[]> {
+  // Must match the cap inside fetchCountyParcels (resultRecordCount is clamped
+  // there), or the end-of-results break below fires after the first page.
+  const PAGE = 100;
   const pages: ListingCard[] = [];
   let offset = 0;
   while (pages.length < max) {
+    const requested = Math.min(PAGE, max - pages.length);
     const r = await fetchCountyParcels({
-      max: Math.min(PAGE, max - pages.length),
-      minAssessed: FLIP_PROFILE.minAssessed,
-      maxAssessed: FLIP_PROFILE.maxAssessed,
+      max: requested,
+      offset,
+      minAssessed: flipProfile.minAssessed,
+      maxAssessed: flipProfile.maxAssessed,
     });
     if (r.error || r.cards.length === 0) break;
-    // ArcGIS only supports resultOffset when set on the URL; for a true
-    // pagination we would need offset param. For our budget band and route
-    // time-budget, a single ordered pass is sufficient.
     pages.push(...r.cards);
-    break;
+    offset += r.cards.length;
+    if (r.cards.length < requested) break;
   }
   return pages;
 }
 
 export async function huntLeads(config: HuntConfig): Promise<HuntResult> {
   const admin = createAdminClient();
+  const settings = config.settings ?? DEFAULT_SETTINGS;
+  const flipProfile = settings.flipProfile;
   const result: HuntResult = {
     scanned: 0,
     newLeads: 0,
@@ -114,8 +128,8 @@ export async function huntLeads(config: HuntConfig): Promise<HuntResult> {
 
   let listings: ListingCard[] = [];
   if (config.statewide) {
-    const max = config.maxTotal ?? 200;
-    listings = await fetchStatewideParcels(max);
+    const max = config.maxTotal ?? flipProfile.maxHuntPerRun;
+    listings = await fetchStatewideParcels(max, flipProfile);
     if (listings.length === 0) {
       result.warnings.push("Statewide NC OneMap feed returned no houses in the flip budget — feed may be down.");
     }
@@ -128,8 +142,8 @@ export async function huntLeads(config: HuntConfig): Promise<HuntResult> {
       const parcel = await fetchCountyParcels({
         county,
         max: config.maxPerCounty ?? 25,
-        minAssessed: FLIP_PROFILE.minAssessed,
-        maxAssessed: FLIP_PROFILE.maxAssessed,
+        minAssessed: flipProfile.minAssessed,
+        maxAssessed: flipProfile.maxAssessed,
       });
       if (parcel.status === "not_connected") {
         result.warnings.push(`${county} not connected`);
@@ -144,7 +158,7 @@ export async function huntLeads(config: HuntConfig): Promise<HuntResult> {
     }
   }
 
-  await processListings(listings, knownAddresses, knownPins, admin, config.orgId, result);
+  await processListings(listings, knownAddresses, knownPins, admin, config.orgId, flipProfile, result);
   return result;
 }
 
@@ -154,6 +168,7 @@ async function processListings(
   knownPins: Set<string>,
   admin: ReturnType<typeof createAdminClient>,
   orgId: string,
+  flipProfile: OrgSettings["flipProfile"],
   result: HuntResult
 ) {
   for (const listing of listings) {
@@ -170,7 +185,7 @@ async function processListings(
     knownAddresses.add(addrKey);
     if (pinKey) knownPins.add(pinKey);
 
-    const { score, tier } = scoreAndTier(listing);
+    const { score, tier } = scoreAndTier(listing, flipProfile);
     if (result.tiers) result.tiers[tier]++;
 
     const motivationNotes = listing.motivation?.reasons?.length

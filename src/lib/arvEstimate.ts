@@ -17,10 +17,10 @@ import { medianPricePerSqft } from "@/lib/leadScoring";
 
 export interface ArvEstimate {
   arv: number | null;
-  source: "assessed_value" | "sqft_median" | "combined" | "not_enough_data";
+  source: "assessed_value" | "sqft_median" | "combined" | "comps" | "not_enough_data";
   confidence: "low" | "medium" | null;
   disclaimer: string;
-  inputs: { assessedValue?: number; sqft?: number; county: string };
+  inputs: { assessedValue?: number; sqft?: number; county: string; compCount?: number };
   signals: string[];
 }
 
@@ -46,6 +46,7 @@ export function estimateArv(params: {
   county: string;
   assessedValue?: number | null;
   sqft?: number | null;
+  comps?: Array<{ sale_price: number | null }> | null;
 }): ArvEstimate {
   const { county } = params;
   const assessedValue =
@@ -54,9 +55,30 @@ export function estimateArv(params: {
       : undefined;
   const sqft =
     params.sqft != null && Number.isFinite(params.sqft) && params.sqft > 0 ? params.sqft : undefined;
+  const compPrices = (params.comps ?? [])
+    .map((c) => Number(c.sale_price))
+    .filter((n) => Number.isFinite(n) && n > 0);
 
   const signals: string[] = [];
   const disclaimer = ARV_DISCLAIMER;
+
+  // Real comps beat heuristics whenever at least 2 are on file. Still an
+  // estimate — comps are entered by the operator or a provider, not an appraisal.
+  if (compPrices.length >= 2) {
+    const sorted = [...compPrices].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+    const arv = Math.round(median);
+    signals.push(`Median of ${compPrices.length} comps: $${arv.toLocaleString("en-US")}`);
+    return {
+      arv,
+      source: "comps",
+      confidence: "medium",
+      disclaimer,
+      inputs: { assessedValue, sqft, county, compCount: compPrices.length },
+      signals,
+    };
+  }
 
   const fromAssessed = (): ArvEstimate => {
     const arv = Math.round(assessedValue! * assessmentToMarket(county));

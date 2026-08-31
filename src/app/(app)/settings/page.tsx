@@ -1,8 +1,9 @@
 import Link from "next/link";
-import { Download, Database, Cpu } from "lucide-react";
+import { Download, Database, Cpu, SlidersHorizontal } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import SettingsForm from "@/components/settings/SettingsForm";
+import FlipProfileForm from "@/components/settings/FlipProfileForm";
 
 export const metadata = { title: "Settings | NC House Flip Studio" };
 
@@ -44,6 +45,19 @@ export default async function SettingsPage() {
           {profile?.role ? ` · ${profile.role}` : ""}
         </p>
         <SettingsForm initialDisplayName={profile?.display_name ?? ""} />
+      </div>
+
+      {/* Flip profile & autonomous agent */}
+      <div className="rounded-xl border border-zinc-200 bg-white p-5">
+        <h2 className="mb-1 flex items-center gap-2 text-base font-semibold text-zinc-900">
+          <SlidersHorizontal className="h-4 w-4 text-zinc-400" />
+          Flip profile &amp; autonomous agent
+        </h2>
+        <p className="mb-4 text-sm text-zinc-500">
+          Budget band, hunt scope, and underwriting assumptions the agent uses.
+          Saved per-org and read by the scheduled cycles.
+        </p>
+        <FlipProfileForm />
       </div>
 
       {/* Data export */}

@@ -29,6 +29,10 @@ function state(over: Partial<PlannerState> = {}): PlannerState {
     documents: [],
     rehabItems: [],
     contractors: [],
+    rfqDrafts: [],
+    pendingGates: [],
+    recentChases: [],
+    comps: {},
     underwritings: {},
     ...over,
   };
@@ -277,6 +281,7 @@ describe("planAgentActions — contractor verification", () => {
             license_number: "12345",
             insurance_expiry: null,
             verified_at: null,
+            license_checked_at: null,
           },
         ],
       })
@@ -301,6 +306,7 @@ describe("planAgentActions — contractor verification", () => {
             license_number: "12345",
             insurance_expiry: in15Days,
             verified_at: new Date().toISOString(),
+            license_checked_at: null,
           },
         ],
       })

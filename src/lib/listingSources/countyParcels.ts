@@ -138,16 +138,21 @@ export async function fetchCountyParcels(params: {
   max?: number;
   minAssessed?: number;
   maxAssessed?: number;
+  offset?: number;
 }): Promise<{ cards: ListingCard[]; status: "connected" | "not_connected"; error?: string }> {
   const max = Math.min(params.max ?? 50, 100);
   const minVal = params.minAssessed ?? FLIP_PROFILE.minAssessed;
   const maxVal = params.maxAssessed ?? FLIP_PROFILE.maxAssessed;
+  const offset = Math.max(0, Math.floor(params.offset ?? 0));
 
   const conditions: string[] = [];
   if (minVal > 0 && maxVal > 0) {
     conditions.push(`parval BETWEEN ${minVal} AND ${maxVal}`);
   }
-  if (params.county) conditions.push(`UPPER(cntyname) = UPPER('${params.county}')`);
+  if (params.county) {
+    const safeCounty = params.county.replace(/'/g, "").replace(/"/g, "").trim();
+    if (safeCounty) conditions.push(`UPPER(cntyname) = UPPER('${safeCounty}')`);
+  }
   if (params.address) {
     conditions.push(`UPPER(siteadd) LIKE UPPER('%${params.address.replace(/'/g, "").trim()}%')`);
   }
@@ -164,8 +169,12 @@ export async function fetchCountyParcels(params: {
     "parval", "landval", "improvval", "gisacres", "saledate", "structyear", "cntyname",
   ].join(",");
 
+  // Deterministic day-based rotation so successive hunts surface different
+  // properties instead of re-reading the same cheapest band every run.
+  const orderByFields = rotationOrderBy();
+
   try {
-    const url = `${ONEMAP_BASE}/query?where=${encodeURIComponent(where)}&outFields=${outFields}&returnGeometry=false&resultRecordCount=${max}&orderByFields=parval&f=json`;
+    const url = `${ONEMAP_BASE}/query?where=${encodeURIComponent(where)}&outFields=${outFields}&returnGeometry=false&resultRecordCount=${max}&resultOffset=${offset}&orderByFields=${encodeURIComponent(orderByFields)}&f=json`;
     const res = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
       signal: AbortSignal.timeout(30000),
@@ -188,4 +197,12 @@ export async function fetchCountyParcels(params: {
       error: e instanceof Error ? e.message : "NC OneMap unreachable",
     };
   }
+}
+
+// Rotation: even day-of-year → cheapest first (parval asc); odd → newest
+// structures first (structyear desc). Deterministic, no randomness, testable.
+export function rotationOrderBy(now: Date = new Date()): string {
+  const start = new Date(now.getFullYear(), 0, 0);
+  const dayOfYear = Math.floor((now.getTime() - start.getTime()) / 86_400_000);
+  return dayOfYear % 2 === 0 ? "parval ASC" : "structyear DESC";
 }

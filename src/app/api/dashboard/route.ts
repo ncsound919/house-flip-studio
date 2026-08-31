@@ -120,6 +120,72 @@ export async function GET() {
       }
     }
 
+    // --- Business pulse KPIs (deterministic, no LLM) ---
+    const dealIds = dealList.map((d) => d.id);
+    const [{ data: uws }, { data: lastRun }, { count: pendingCount }] = await Promise.all([
+      dealIds.length > 0
+        ? admin.from("underwriting").select("deal_id, arv, projected_profit").in("deal_id", dealIds)
+        : Promise.resolve({ data: null, error: null }),
+      admin
+        .from("agent_runs")
+        .select("status, started_at, finished_at")
+        .eq("org_id", orgId)
+        .order("started_at", { ascending: false })
+        .limit(1),
+      admin
+        .from("agent_actions")
+        .select("id", { count: "exact", head: true })
+        .eq("org_id", orgId)
+        .eq("status", "pending_approval"),
+    ]);
+
+    const openUws = (uws ?? []) as Array<{ deal_id: string; arv: number | null; projected_profit: number | null }>;
+    const openIds = new Set(dealList.filter((d) => d.stage !== "Closed").map((d) => d.id));
+    const orgUws = openUws.filter((u) => openIds.has(u.deal_id));
+    const projectedProfitSum = orgUws.reduce((s, u) => s + (Number(u.projected_profit) || 0), 0);
+    const arvSum = orgUws.reduce((s, u) => s + (Number(u.arv) || 0), 0);
+
+    // Lead tier counts parsed from the deterministic notes the hunt wrote.
+    const tiers = { hot: 0, warm: 0, cold: 0 };
+    for (const d of dealList) {
+      const notes = String((d as Deal & { notes?: string }).notes ?? "");
+      if (notes.includes("Tier: HOT LEAD")) tiers.hot++;
+      else if (notes.includes("Tier: WARM LEAD")) tiers.warm++;
+      else if (notes.includes("Tier: COLD LEAD")) tiers.cold++;
+    }
+
+    // Average dwell per stage across open deals (how long things sit).
+    const dwellByStage: Record<string, { total: number; count: number }> = {};
+    for (const d of dealList) {
+      if (d.stage === "Closed") continue;
+      const t = dwellByStage[d.stage] ?? { total: 0, count: 0 };
+      t.total += daysSince(d.stage_changed_at || d.created_at);
+      t.count += 1;
+      dwellByStage[d.stage] = t;
+    }
+    const avgStageDwell = Object.entries(dwellByStage)
+      .filter(([, v]) => v.count > 0)
+      .map(([stage, v]) => ({ stage, avgDays: Math.round(v.total / v.count) }));
+
+    const run = (lastRun?.[0] as { status?: string; started_at?: string } | undefined) ?? null;
+    const kpis = {
+      projectedProfitSum,
+      arvSum,
+      tiers,
+      avgStageDwell,
+      moneyGatesAwaiting: pendingCount ?? 0,
+      lastAgentRun: run
+        ? { status: run.status ?? "unknown", started_at: run.started_at ?? null }
+        : null,
+    };
+
+    // 6. Red flag: money gates piling up unapproved.
+    if ((pendingCount ?? 0) > 0) {
+      flags.push(
+        `${pendingCount} money-gate action${pendingCount === 1 ? "" : "s"} awaiting your approval in the Flip operator pane.`
+      );
+    }
+
     const topLeads = scoredDeals
       .filter((d) => d.attentionScore != null)
       .sort((a, b) => (b.attentionScore ?? 0) - (a.attentionScore ?? 0))
@@ -136,6 +202,7 @@ export async function GET() {
         actions: actions.length,
         overdueDocs: (documents ?? []).filter((d) => d.status === "missing" || d.status === "requested").length,
       },
+      kpis,
       flags: flags.slice(0, 15),
       actions: actions.slice(0, 10),
       topLeads,

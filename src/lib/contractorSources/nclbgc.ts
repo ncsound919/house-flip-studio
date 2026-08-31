@@ -45,16 +45,16 @@ export function parseNclbgcResponse(html: string): NclbgcVerifyResult {
 
   // Active detection — require an explicit active marker tied to license context
   // Look for common nclbgc patterns:
-  //   "License Status: Active", "Status: Active", "Current and Active", "Active License"
+  //   "License Status: Active", "Status: Active", "Current and Active"
+  // ("active license" as prose in nav/footer copy is NOT sufficient.)
   const activeRe =
-    /license\s*status[^<]*:\s*active|status[^<]*:\s*active\b|current\s+and\s+active|\bactive\s+license\b/i;
+    /license\s*status[^<]*:\s*active|status[^<]*:\s*active\b|current\s+and\s+active/i;
 
-  // Fallback: if html contains both "license" and "active" in reasonable proximity,
-  // treat as active (covers simpler fixture markup) but only if no inactive marker found
+  // Fallback for simpler markup: "license status:" followed by "active" within
+  // a short window. This is a genuine status line, NOT any page that happens to
+  // contain the words "license" and "active" somewhere (nav/footer/copy).
   const hasActiveExplicit = activeRe.test(html);
-  const hasActiveFallback =
-    lower.includes("active") &&
-    (lower.includes("license status") || lower.includes("license") || lower.includes("classification"));
+  const hasActiveFallback = /license\s*status[^<]*:\s*[^<\n\r]{0,60}\bactive\b/i.test(html);
 
   if (!hasActiveExplicit && !hasActiveFallback) {
     return { verified: false, detail: "License not verified or not active" };
@@ -117,6 +117,7 @@ export async function verifyOnNclbgc(
     const res = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0 (House Flip Studio license verification)" },
       cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
     });
 
     if (!res.ok) {
