@@ -6,6 +6,7 @@ import {
   flipProfileFor,
   underwritingFor,
 } from "../lib/orgSettings";
+import { DEFAULT_GUARDRAILS } from "../lib/guardrails/limits";
 
 vi.mock("@/lib/apiHelpers", () => ({
   createAdminClient: vi.fn(),
@@ -116,5 +117,23 @@ describe("orgSettings", () => {
     // Stored settings untouched — never reset to defaults on a bad patch.
     const stored = store.org_settings as { data: { flipProfile: { minAssessed: number } } };
     expect(stored.data.flipProfile.minAssessed).toBe(60_000);
+  });
+});
+
+describe("orgSettings — agent.limits", () => {
+  it("defaults agent.limits to all-disabled guardrails", () => {
+    const s = parseOrgSettings({});
+    expect(s.agent.limits).toEqual(DEFAULT_GUARDRAILS);
+  });
+
+  it("preserves an explicit limits patch", () => {
+    const s = parseOrgSettings({
+      agent: { limits: { autoSendOffers: { enabled: true, maxOfferAmount: 40_000, dailyCap: 3 } } },
+    });
+    expect(s.agent.limits.autoSendOffers.enabled).toBe(true);
+  });
+
+  it("DEFAULT_SETTINGS carries limits", () => {
+    expect(DEFAULT_SETTINGS.agent.limits).toEqual(DEFAULT_GUARDRAILS);
   });
 });
