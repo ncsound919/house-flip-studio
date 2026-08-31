@@ -22,6 +22,17 @@ interface DashboardData {
     moneyGatesAwaiting: number;
     lastAgentRun: { status: string; started_at: string | null } | null;
   };
+  finance: {
+    realizedProfit: number;
+    realizedCount: number;
+    pipelineValue: number;
+    averageCycleDays: number | null;
+    openDealCount: number;
+    roi: number | null;
+  };
+  cashFlow: { month: string; in: number; out: number }[];
+  hitRate: { rate: number | null; sampleSize: number; closed: number };
+  paymentsUnavailable: boolean;
   flags: string[];
   actions: {
     id: string;
@@ -58,6 +69,18 @@ const kindLabel: Record<string, string> = {
   document: "Paperwork",
   contractor: "Contractor",
 };
+
+function LabelBadge({ kind }: { kind: "real" | "projected" }) {
+  return (
+    <span
+      className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
+        kind === "real" ? "bg-emerald-600 text-white" : "bg-amber-400 text-amber-900"
+      }`}
+    >
+      {kind}
+    </span>
+  );
+}
 
 function timeAgo(iso: string | null): string {
   if (!iso) return "never";
@@ -115,6 +138,9 @@ export default function CommandCenter() {
   if (loading) {
     return <p className="text-sm text-zinc-500">Scanning your pipeline…</p>;
   }
+
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const thisMonthFlow = data?.cashFlow.find((c) => c.month === thisMonth);
 
   return (
     <div className="space-y-6">
@@ -258,6 +284,82 @@ export default function CommandCenter() {
             <p className="text-[11px] font-medium text-amber-700">Money gates awaiting you</p>
             <p className="mt-1 text-xl font-bold tracking-tight text-zinc-900">
               {data?.kpis.moneyGatesAwaiting ?? 0}
+            </p>
+          </div>
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-3">
+          <div className="rounded-xl bg-emerald-50/60 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-medium text-emerald-700">Realized profit</p>
+              <LabelBadge kind="real" />
+            </div>
+            <p className="mt-1 text-xl font-bold tracking-tight text-zinc-900">
+              {money(data?.finance.realizedProfit ?? 0)}
+            </p>
+            <p className="mt-0.5 text-[11px] text-zinc-500">
+              {data?.finance.realizedCount ?? 0} closed deal{data?.finance.realizedCount === 1 ? "" : "s"} with actuals
+            </p>
+          </div>
+          <div className="rounded-xl bg-amber-50/60 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-medium text-amber-700">Pipeline value</p>
+              <LabelBadge kind="projected" />
+            </div>
+            <p className="mt-1 text-xl font-bold tracking-tight text-zinc-900">
+              {money(data?.finance.pipelineValue ?? 0)}
+            </p>
+            <p className="mt-0.5 text-[11px] text-zinc-500">
+              {data?.finance.openDealCount ?? 0} open deal{data?.finance.openDealCount === 1 ? "" : "s"} (projected profit)
+            </p>
+          </div>
+          <div className="rounded-xl bg-emerald-50/60 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-medium text-emerald-700">Avg cycle time</p>
+              <LabelBadge kind="real" />
+            </div>
+            <p className="mt-1 text-xl font-bold tracking-tight text-zinc-900">
+              {data?.finance.averageCycleDays != null ? `${data.finance.averageCycleDays}d` : "—"}
+            </p>
+            <p className="mt-0.5 text-[11px] text-zinc-500">Lead → Closed, real deals only</p>
+          </div>
+          <div className="rounded-xl bg-emerald-50/60 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-medium text-emerald-700">ROI (realized)</p>
+              <LabelBadge kind="real" />
+            </div>
+            <p className="mt-1 text-xl font-bold tracking-tight text-zinc-900">
+              {data?.finance.roi != null ? `${data.finance.roi}%` : "—"}
+            </p>
+            <p className="mt-0.5 text-[11px] text-zinc-500">On invested capital (purchase price)</p>
+          </div>
+          <div className="rounded-xl bg-blue-50/60 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-medium text-blue-700">Cash flow this month</p>
+              <LabelBadge kind="real" />
+            </div>
+            <p className="mt-1 text-sm font-bold tracking-tight text-zinc-900">
+              in {money(thisMonthFlow?.in ?? 0)}
+              <span className="mx-1 text-zinc-300">·</span>
+              out {data?.paymentsUnavailable ? "—" : money(thisMonthFlow?.out ?? 0)}
+            </p>
+            <p className="mt-0.5 text-[11px] text-zinc-500">
+              {data?.paymentsUnavailable
+                ? "Outflows unavailable — payments ledger absent"
+                : "Closes in, real ledger out"}
+            </p>
+          </div>
+          <div className="rounded-xl bg-violet-50/60 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-medium text-violet-700">Hit rate</p>
+              <LabelBadge kind="real" />
+            </div>
+            <p className="mt-1 text-xl font-bold tracking-tight text-zinc-900">
+              {data?.hitRate.rate != null ? `${data.hitRate.rate}%` : "—"}
+            </p>
+            <p className="mt-0.5 text-[11px] text-zinc-500">
+              {data?.hitRate.sampleSize
+                ? `${data.hitRate.closed} closed of ${data.hitRate.sampleSize} offer${data.hitRate.sampleSize === 1 ? "" : "s"}`
+                : "No offers recorded yet"}
             </p>
           </div>
         </div>
