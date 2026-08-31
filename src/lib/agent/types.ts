@@ -24,6 +24,7 @@ export type AgentActionKind =
   | "send_rfq" // MONEY GATE — requires approval
   | "send_offer" // MONEY GATE — requires approval
   | "start_rehab" // MONEY GATE — requires approval
+  | "fetch_comps" // pulled real comps for a deal (non-money)
   | "info"; // diagnostic / skipped / blocked
 
 export type AgentActionStatus = "done" | "skipped" | "blocked" | "failed" | "pending_approval" | "approved";

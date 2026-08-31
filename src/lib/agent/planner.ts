@@ -190,23 +190,36 @@ function planForLead(deal: PlannerDeal, state: PlannerState, out: PlannedAction[
       approval: { dealId: deal.id, toStage: "Inspecting" },
     });
   }
+
+  // 4) If ARV is heuristic, pull real comps so underwriting can run on real sales.
+  planForComps(deal, state, out);
 }
 
-function promptForCompsIfMissing(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
+function planForComps(deal: PlannerDeal, state: PlannerState, out: PlannedAction[]) {
   // Real comps upgrade ARV from heuristic to comp-based. If the deal already has
-  // an ARV but it wasn't comp-derived and fewer than 2 comps are on file, ask.
-  if (deal.arv_estimate != null && deal.arv_method !== "comps") {
-    const compCount = (state.comps[deal.id] ?? []).length;
-    if (compCount < 2) {
-      out.push({
-        kind: "info",
-        dealId: deal.id,
-        title: `Add ${2 - compCount} comp${2 - compCount === 1 ? "" : "s"} for ${deal.address}`,
-        detail: `ARV is ${deal.arv_method ?? "heuristic"} (${money(deal.arv_estimate)}). Adding at least 2 real comps lets underwriting run on a comp-based ARV.`,
-        requires_approval: false,
-        metadata: { reason: "comps_missing", compCount },
-      });
-    }
+  // an ARV but it wasn't comp-derived and fewer than 2 comps are on file, emit a
+  // real fetch_comps action so the runner pulls deed-transfer comps.
+  if (deal.arv_method === "comps") return;
+  if (deal.arv_estimate == null) return; // nothing to upgrade yet
+  const compCount = (state.comps[deal.id] ?? []).length;
+  if (compCount < 2) {
+    out.push({
+      kind: "fetch_comps",
+      dealId: deal.id,
+      title: `Fetch real comps for ${deal.address}`,
+      detail: `ARV is ${deal.arv_method ?? "heuristic"} (${money(deal.arv_estimate)}). Agent will pull deed-transfer comps to upgrade underwriting.`,
+      requires_approval: false,
+      metadata: { reason: "comps_missing", compCount },
+    });
+  } else {
+    out.push({
+      kind: "info",
+      dealId: deal.id,
+      title: `Comps on file for ${deal.address}`,
+      detail: `${compCount} comps present — ARV can be upgraded if re-estimated.`,
+      requires_approval: false,
+      metadata: { reason: "comps_present", compCount },
+    });
   }
 }
 
@@ -223,7 +236,7 @@ function planForInspecting(deal: PlannerDeal, state: PlannerState, out: PlannedA
       metadata: { note: "Deterministic costs; LLM-polished descriptions when enabled" },
     });
   }
-  promptForCompsIfMissing(deal, state, out);
+  planForComps(deal, state, out);
   // If underwriting exists and passes, advance to Underwriting. NOT a money gate.
   const uw = state.underwritings[deal.id];
   if (uw && uw.passes_70_rule === true) {
@@ -261,7 +274,7 @@ function planForUnderwriting(deal: PlannerDeal, state: PlannerState, out: Planne
       metadata: { note: "Deterministic costs; LLM-polished descriptions when enabled" },
     });
   }
-  promptForCompsIfMissing(deal, state, out);
+  planForComps(deal, state, out);
   // Money gate: making an offer. The agent DRAFTS the advance but does NOT execute.
   // Never stack a second pending gate if one already awaits approval.
   const uw = state.underwritings[deal.id];

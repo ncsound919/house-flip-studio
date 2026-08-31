@@ -129,15 +129,16 @@ describe("planAgentActions — comps-driven ARV", () => {
     expect(arv!.metadata.compCount).toBe(2);
   });
 
-  it("prompts to add comps when ARV is heuristic and none are on file", () => {
+  it("emits fetch_comps when ARV is heuristic and none are on file", () => {
     const plan = planAgentActions(
       state({
         deals: [deal({ stage: "Inspecting", arv_estimate: 250_000, arv_method: "combined" })],
       })
     );
-    const prompt = plan.find((p) => p.kind === "info" && p.metadata.reason === "comps_missing");
-    expect(prompt).toBeDefined();
-    expect(prompt!.title).toContain("Add 2 comps");
+    const fc = plan.find((p) => p.kind === "fetch_comps" && p.metadata.reason === "comps_missing");
+    expect(fc).toBeDefined();
+    expect(fc!.title).toContain("Fetch real comps");
+    expect(fc!.requires_approval).toBe(false);
   });
 });
 
