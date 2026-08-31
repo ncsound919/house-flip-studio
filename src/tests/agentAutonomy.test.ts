@@ -1,9 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   planAgentActions,
   type PlannerState,
   type PlannerDeal,
 } from "../lib/agent/planner";
+
+vi.mock("@/lib/research/sources/deeds", () => ({
+  fetchDeedComps: vi.fn(),
+}));
+
+import { executeStep } from "../lib/agent/runner";
+import { fetchDeedComps } from "../lib/research/sources/deeds";
+import { DEFAULT_SETTINGS } from "../lib/orgSettings";
 
 function deal(over: Partial<PlannerDeal> = {}): PlannerDeal {
   return {
@@ -129,15 +137,16 @@ describe("planAgentActions — comps-driven ARV", () => {
     expect(arv!.metadata.compCount).toBe(2);
   });
 
-  it("prompts to add comps when ARV is heuristic and none are on file", () => {
+  it("emits fetch_comps when ARV is heuristic and none are on file", () => {
     const plan = planAgentActions(
       state({
         deals: [deal({ stage: "Inspecting", arv_estimate: 250_000, arv_method: "combined" })],
       })
     );
-    const prompt = plan.find((p) => p.kind === "info" && p.metadata.reason === "comps_missing");
-    expect(prompt).toBeDefined();
-    expect(prompt!.title).toContain("Add 2 comps");
+    const fc = plan.find((p) => p.kind === "fetch_comps" && p.metadata.reason === "comps_missing");
+    expect(fc).toBeDefined();
+    expect(fc!.title).toContain("Fetch real comps");
+    expect(fc!.requires_approval).toBe(false);
   });
 });
 
@@ -256,5 +265,107 @@ describe("planAgentActions — run-level contractor oversight", () => {
       })
     );
     expect(plan.some((p) => p.kind === "chase_document" && p.contractorId === "c1")).toBe(true);
+  });
+});
+
+describe("executeStep — fetch_comps (mocked deed feed)", () => {
+  function makeStepAdmin(deal?: { id: string; org_id: string; address: string }) {
+    const inserted: { table: string; rows: unknown[] }[] = [];
+    const admin = {
+      from: (table: string) => {
+        const t = table as string;
+        return {
+          select: () => ({
+            eq: (_k: string, _v: string) => ({
+              single: async () => ({ data: deal ?? null, error: null }),
+            }),
+          }),
+          insert: async (rows: unknown) => {
+            inserted.push({ table: t, rows: Array.isArray(rows) ? rows : [rows] });
+            return { error: null };
+          },
+        };
+      },
+    };
+    return { admin, inserted };
+  }
+
+  const fetchStep = {
+    kind: "fetch_comps",
+    dealId: "d1",
+    title: "Fetch real comps for 123 Test St",
+    detail: "ARV is sqft_median. Agent will pull deed-transfer comps.",
+    requires_approval: false,
+    metadata: { reason: "comps_missing", compCount: 0 },
+  };
+
+  it("inserts deed comps into the comps table and records done with inserted count", async () => {
+    const { admin, inserted } = makeStepAdmin({ id: "d1", org_id: "org1", address: "123 Test St" });
+    vi.mocked(fetchDeedComps).mockResolvedValue({
+      source: "deeds",
+      status: "ok",
+      fetchedAt: new Date().toISOString(),
+      data: [
+        { sale_price: 200_000, sale_date: "2026-05-01", source: "deeds" },
+        { sale_price: 210_000, sale_date: "2026-04-15", source: "deeds" },
+      ],
+    });
+
+    const res = await executeStep(
+      admin as never,
+      "org1",
+      "run1",
+      fetchStep as never,
+      { executeMoneyActions: false, settings: DEFAULT_SETTINGS }
+    );
+    expect(res.status).toBe("done");
+
+    const comps = inserted.find((i) => i.table === "comps");
+    expect(comps).toBeDefined();
+    expect(comps!.rows).toHaveLength(2);
+    expect(comps!.rows[0]).toMatchObject({ deal_id: "d1", sale_price: 200_000, source: "deeds" });
+
+    const actions = inserted.filter((i) => i.table === "agent_actions");
+    const last = actions[actions.length - 1].rows[actions.length - 1] as {
+      status: string;
+      metadata: { inserted?: number };
+    };
+    expect(last.status).toBe("done");
+    expect(last.metadata.inserted).toBe(2);
+  });
+
+  it("records failed when the deed feed returns no comps", async () => {
+    const { admin, inserted } = makeStepAdmin({ id: "d1", org_id: "org1", address: "123 Test St" });
+    vi.mocked(fetchDeedComps).mockResolvedValue({
+      source: "deeds",
+      status: "error",
+      fetchedAt: new Date().toISOString(),
+      error: "NC_DEEDS_ENDPOINT not configured",
+    });
+
+    const res = await executeStep(
+      admin as never,
+      "org1",
+      "run1",
+      fetchStep as never,
+      { executeMoneyActions: false, settings: DEFAULT_SETTINGS }
+    );
+    expect(res.status).toBe("failed");
+
+    const actions = inserted.filter((i) => i.table === "agent_actions");
+    const last = actions[actions.length - 1].rows[actions.length - 1] as { status: string };
+    expect(last.status).toBe("failed");
+  });
+
+  it("skips when the deal is missing or belongs to another org", async () => {
+    const { admin } = makeStepAdmin({ id: "d1", org_id: "other-org", address: "123 Test St" });
+    const res = await executeStep(
+      admin as never,
+      "org1",
+      "run1",
+      fetchStep as never,
+      { executeMoneyActions: false, settings: DEFAULT_SETTINGS }
+    );
+    expect(res.status).toBe("skipped");
   });
 });

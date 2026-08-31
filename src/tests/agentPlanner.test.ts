@@ -345,3 +345,33 @@ describe("planAgentActions — money gate integrity", () => {
     }
   });
 });
+
+describe("planAgentActions — fetch_comps", () => {
+  it("emits fetch_comps when ARV is heuristic and <2 comps on file", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ arv_estimate: 280_000, arv_method: "sqft_median" })],
+      })
+    );
+    const fc = plan.find((p) => p.kind === "fetch_comps");
+    expect(fc).toBeDefined();
+    expect(fc!.requires_approval).toBe(false);
+  });
+
+  it("does NOT emit fetch_comps when 2+ comps already on file", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ arv_estimate: 280_000, arv_method: "sqft_median" })],
+        comps: { d1: [{ sale_price: 200_000 }, { sale_price: 210_000 }] },
+      })
+    );
+    expect(plan.find((p) => p.kind === "fetch_comps")).toBeUndefined();
+  });
+
+  it("does NOT emit fetch_comps when ARV is already comps-derived", () => {
+    const plan = planAgentActions(
+      state({ deals: [deal({ arv_estimate: 205_000, arv_method: "comps" })] })
+    );
+    expect(plan.find((p) => p.kind === "fetch_comps")).toBeUndefined();
+  });
+});

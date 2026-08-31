@@ -8,6 +8,7 @@ import { verifyContractor } from "@/lib/contractorVerification";
 import { buildDeterministicRfq } from "@/lib/rfqBuilder";
 import { generateScopeForDeal } from "@/lib/agent/scope";
 import { evaluateAction } from "@/lib/guardrails/evaluate";
+import { fetchDeedComps } from "@/lib/research/sources/deeds";
 import {
   planAgentActions,
   type PlannedAction,
@@ -248,7 +249,8 @@ export async function runAgentCycle(opts: RunOptions): Promise<RunResult> {
 
 // --- Action execution --------------------------------------------------------
 
-async function executeStep(
+// Exported for direct handler tests (injected admin client keeps it hermetic).
+export async function executeStep(
   admin: ReturnType<typeof createAdminClient>,
   orgId: string,
   runId: string,
@@ -303,6 +305,8 @@ async function executeStep(
     case "send_offer":
     case "start_rehab":
       return { status: "skipped" as AgentActionStatus, reason: "money-gated action not authorized in this run" };
+    case "fetch_comps":
+      return await applyFetchComps(admin, runId, orgId, step);
     case "info":
       await recordAction(admin, runId, orgId, step, "skipped", { info: true });
       return { status: "skipped" as AgentActionStatus };
@@ -582,6 +586,48 @@ async function applyDraftRfq(
   await recordAction(admin, runId, orgId, step, "done", {
     address: addressLine,
     scopeItemCount: itemsOrg.length,
+  });
+  return { status: "done" };
+}
+
+async function applyFetchComps(
+  admin: ReturnType<typeof createAdminClient>,
+  runId: string,
+  orgId: string,
+  step: PlannedAction
+): ExecResult {
+  if (!step.dealId) return { status: "skipped", reason: "no dealId" };
+  const dealId = step.dealId;
+  const { data: deal } = await admin
+    .from("deals")
+    .select("id, org_id, address")
+    .eq("id", dealId)
+    .single();
+  if (!deal || deal.org_id !== orgId) return { status: "skipped", reason: "deal missing or org mismatch" };
+  const address = (deal as { address: string }).address;
+  const r = await fetchDeedComps(address);
+  if (r.status !== "ok" || !r.data || r.data.length === 0) {
+    await recordAction(admin, runId, orgId, step, "failed", {
+      error: r.error ?? "no comps returned",
+      source: "deeds",
+    });
+    return { status: "failed", reason: r.error ?? "no comps returned" };
+  }
+  const rows = r.data.slice(0, 10).map((c) => ({
+    deal_id: dealId,
+    sale_price: c.sale_price,
+    sale_date: c.sale_date ?? null,
+    source: c.source,
+    distance_score: c.distance_score ?? null,
+  }));
+  const { error } = await admin.from("comps").insert(rows);
+  if (error) {
+    await recordAction(admin, runId, orgId, step, "failed", { error: error.message });
+    return { status: "failed", reason: error.message };
+  }
+  await recordAction(admin, runId, orgId, step, "done", {
+    source: "deeds",
+    inserted: rows.length,
   });
   return { status: "done" };
 }

@@ -1,3 +1,7 @@
+// Research source contracts — every external source returns a SourceResult with
+// an explicit status. Nothing is ever fabricated: a source either returns real
+// data (ok) or an honest error.
+
 export type SourceStatus = "ok" | "error";
 
 export interface SourceResult<T> {

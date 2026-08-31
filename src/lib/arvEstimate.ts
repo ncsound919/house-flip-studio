@@ -18,7 +18,7 @@ import { medianPricePerSqft } from "@/lib/leadScoring";
 export interface ArvEstimate {
   arv: number | null;
   source: "assessed_value" | "sqft_median" | "combined" | "comps" | "not_enough_data";
-  confidence: "low" | "medium" | null;
+  confidence: "low" | "medium" | "high" | null;
   disclaimer: string;
   inputs: { assessedValue?: number; sqft?: number; county: string; compCount?: number };
   signals: string[];
@@ -46,7 +46,7 @@ export function estimateArv(params: {
   county: string;
   assessedValue?: number | null;
   sqft?: number | null;
-  comps?: Array<{ sale_price: number | null }> | null;
+  comps?: Array<{ sale_price: number | null; sale_date?: string | null; source?: string | null }> | null;
 }): ArvEstimate {
   const { county } = params;
   const assessedValue =
@@ -55,27 +55,35 @@ export function estimateArv(params: {
       : undefined;
   const sqft =
     params.sqft != null && Number.isFinite(params.sqft) && params.sqft > 0 ? params.sqft : undefined;
-  const compPrices = (params.comps ?? [])
-    .map((c) => Number(c.sale_price))
-    .filter((n) => Number.isFinite(n) && n > 0);
+  const compEntries = (params.comps ?? [])
+    .map((c) => ({
+      price: Number(c.sale_price),
+      date: c.sale_date ? new Date(c.sale_date + (c.sale_date.length === 10 ? "T00:00:00" : "")) : null,
+    }))
+    .filter((c) => Number.isFinite(c.price) && c.price > 0);
 
   const signals: string[] = [];
   const disclaimer = ARV_DISCLAIMER;
 
   // Real comps beat heuristics whenever at least 2 are on file. Still an
   // estimate — comps are entered by the operator or a provider, not an appraisal.
-  if (compPrices.length >= 2) {
-    const sorted = [...compPrices].sort((a, b) => a - b);
+  // Confidence weights count AND recency: 4+ comps with 3+ within 12 months is
+  // high; otherwise medium. Recency is real math on real sale dates, not a knob.
+  if (compEntries.length >= 2) {
+    const now = Date.now();
+    const fresh = compEntries.filter((c) => c.date && now - c.date.getTime() <= 365 * 86_400_000).length;
+    const sorted = [...compEntries.map((c) => c.price)].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
     const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
     const arv = Math.round(median);
-    signals.push(`Median of ${compPrices.length} comps: $${arv.toLocaleString("en-US")}`);
+    const confidence: "medium" | "high" = compEntries.length >= 4 && fresh >= 3 ? "high" : "medium";
+    signals.push(`Median of ${compEntries.length} real comps: $${arv.toLocaleString("en-US")} (${fresh} within 12 months)`);
     return {
       arv,
       source: "comps",
-      confidence: "medium",
+      confidence,
       disclaimer,
-      inputs: { assessedValue, sqft, county, compCount: compPrices.length },
+      inputs: { assessedValue, sqft, county, compCount: compEntries.length },
       signals,
     };
   }
