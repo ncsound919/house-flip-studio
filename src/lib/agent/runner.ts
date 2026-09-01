@@ -1033,7 +1033,7 @@ async function loadPlannerState(
         .gte("created_at", new Date(Date.now() - 7 * 86_400_000).toISOString()),
       admin.from("dossiers").select("deal_id").eq("org_id", orgId),
       admin.from("payments").select("id, deal_id, rehab_item_id, amount, status").eq("org_id", orgId),
-      admin.from("outreach").select("deal_id, kind, direction, status, response, sent_at").eq("org_id", orgId),
+      admin.from("outreach").select("deal_id, kind, direction, status, response, sent_at, created_at").eq("org_id", orgId),
       admin.from("change_orders").select("rehab_item_id, status, cost_impact"),
     ]);
 

@@ -31,14 +31,14 @@ export function buildOfferEmail(ctx: OutreachContext): { subject: string; body: 
     `I'm reaching out about your property at ${ctx.address}. I buy homes directly — no agents, no repairs, no fees on your side, and I can close on your timeline.`,
     ctx.assessedValue != null
       ? `\nI've reviewed the public tax record for this property (assessed value ${money(ctx.assessedValue)}).`
-      : ``,
+      : null,
     `\nIf selling this property is something you'd consider, I'd love to talk. I respond quickly, and there's no obligation to accept.`,
     ``,
     `Best,`,
     ctx.signature,
-    ctx.phone ? ctx.phone : "",
+    ctx.phone ?? null,
   ]
-    .filter((l) => l !== null && l !== undefined)
+    .filter((l): l is string => l != null)
     .join("\n");
   return { subject, body };
 }
@@ -58,9 +58,9 @@ export function buildFollowUpEmail(
     ``,
     `Best,`,
     ctx.signature,
-    ctx.phone ? ctx.phone : "",
+    ctx.phone ?? null,
   ]
-    .filter((l) => l !== null && l !== undefined)
+    .filter((l): l is string => l != null)
     .join("\n");
   return { subject, body };
 }

@@ -98,6 +98,7 @@ export interface PlannerOutreachRow {
   status: string; // draft | sent | failed
   response: string;
   sent_at: string | null;
+  created_at?: string;
 }
 
 export interface PlannerChangeOrder {
@@ -714,8 +715,17 @@ function planOutreachFollowUps(state: PlannerState, out: PlannedAction[]) {
     const { next } = nextOutreachAction(rows, now, cfg);
     if (next !== "follow_up") continue;
 
+    // A fresh draft already covers this follow-up (the operator hasn't dealt
+    // with it) — don't stack. But a stale draft older than the follow-up window
+    // no longer blocks a new one, so the pipeline never stalls on an orphaned
+    // draft. Missing created_at is treated as fresh (conservative).
+    const nowMs = Date.now();
     const hasDraft = rows.some(
-      (o) => o.direction === "outbound" && o.status === "draft" && o.kind === "follow_up"
+      (o) =>
+        o.direction === "outbound" &&
+        o.status === "draft" &&
+        o.kind === "follow_up" &&
+        (o.created_at == null || nowMs - new Date(o.created_at).getTime() < cfg.followUpDays * 86_400_000)
     );
     if (hasDraft) continue;
 

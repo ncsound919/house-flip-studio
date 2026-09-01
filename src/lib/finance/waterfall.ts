@@ -46,7 +46,10 @@ const round = (n: number) => Math.round(n);
 
 export function computeWaterfall(input: WaterfallInput): WaterfallResult {
   const sorted = [...input.layers].sort((a, b) => a.priority - b.priority);
-  let proceeds = input.exitProceeds;
+  // Net proceeds can be negative (sale price below closing costs) — clamp so no
+  // layer is ever "paid" a negative amount; everything gets 0 and equity absorbs
+  // the full loss.
+  let proceeds = Math.max(0, input.exitProceeds);
   const layers: LayerResult[] = [];
   let totalSeniorPayout = 0;
   let isDeficit = false;

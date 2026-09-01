@@ -154,6 +154,19 @@ export default function OutreachDashboard() {
     }
   };
 
+  const markSent = async (id: string) => {
+    try {
+      await fetch(`/api/outreach/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "sent" }),
+      });
+      await fetchAll();
+    } catch {
+      // ignore
+    }
+  };
+
   if (loading) return <p className="text-sm text-zinc-500">Loading outreach…</p>;
 
   const funnelCards = funnel
@@ -294,6 +307,14 @@ export default function OutreachDashboard() {
                             ) : null}
                             {r.direction === "outbound" && r.response === "none" ? (
                               <div className="mt-2 flex flex-wrap gap-1.5">
+                                {r.status === "draft" ? (
+                                  <button
+                                    onClick={() => markSent(r.id)}
+                                    className="rounded border border-zinc-900 px-2 py-0.5 text-xs font-medium text-zinc-900 hover:bg-zinc-100"
+                                  >
+                                    Mark sent
+                                  </button>
+                                ) : null}
                                 {(["no_interest", "counter", "accepted", "undeliverable"] as const).map((resp) => (
                                   <button
                                     key={resp}

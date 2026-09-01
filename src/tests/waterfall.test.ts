@@ -52,6 +52,24 @@ describe("computeWaterfall", () => {
     expect(r.layers.find((l) => l.kind === "debt")!.paidInFull).toBe(false);
   });
 
+  it("never pays a senior layer a negative amount on a loss below closing costs", () => {
+    const r = computeWaterfall({
+      layers: [
+        { kind: "debt", name: "Hard money", principal: 100_000, annualRate: 0, priority: 0 },
+        equity,
+      ],
+      exitProceeds: -5_000, // sale proceeds do not even cover closing costs
+      monthsHeld: 0,
+    });
+    const debt = r.layers.find((l) => l.kind === "debt")!;
+    const op = r.layers.find((l) => l.kind === "equity")!;
+    expect(debt.payout).toBe(0);
+    expect(debt.returnAmt).toBe(-100_000);
+    expect(op.payout).toBe(0);
+    expect(op.returnAmt).toBe(-20_000);
+    expect(r.isDeficit).toBe(true);
+  });
+
   it("orders payment by priority, not list order", () => {
     const r = computeWaterfall({
       layers: [
