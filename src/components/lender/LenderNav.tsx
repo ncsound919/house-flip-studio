@@ -8,6 +8,7 @@ const links = [
   { href: "/lender/balance-sheet", label: "Balance Sheet" },
   { href: "/lender/debts", label: "Debt Schedule" },
   { href: "/lender/vault", label: "Entity Vault" },
+  { href: "/lender/calibration", label: "Calibration" },
 ];
 
 export default function LenderNav() {
