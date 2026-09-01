@@ -45,11 +45,22 @@ export const llmSettingsSchema = z.object({
   generateScopes: z.boolean().default(true),
 });
 
+export const outreachSchema = z.object({
+  // Acquisition outreach automation. When enabled, the machine surfaces "due
+  // now" follow-ups; sending an offer stays behind the money gate.
+  enabled: z.boolean().default(false),
+  initialFollowUpDays: z.number().default(7),
+  followUpDays: z.number().default(14),
+  maxFollowUps: z.number().default(3),
+  signature: z.string().default(""),
+});
+
 export const orgSettingsSchema = z.object({
   flipProfile: flipProfileSchema.default({}),
   underwriting: underwritingSchema.default({}),
   agent: agentSettingsSchema.default({}),
   llm: llmSettingsSchema.default({}),
+  outreach: outreachSchema.default({}),
 });
 
 export type OrgSettings = z.infer<typeof orgSettingsSchema>;
@@ -88,6 +99,13 @@ export const DEFAULT_SETTINGS: OrgSettings = {
   llm: {
     generateScopes: true,
   },
+  outreach: {
+    enabled: false,
+    initialFollowUpDays: 7,
+    followUpDays: 14,
+    maxFollowUps: 3,
+    signature: "",
+  },
 };
 
 export function parseOrgSettings(raw: unknown): OrgSettings {
@@ -102,6 +120,7 @@ export function parseOrgSettings(raw: unknown): OrgSettings {
     underwriting: parseSection(underwritingSchema, obj.underwriting),
     agent: parseSection(agentSettingsSchema, obj.agent),
     llm: parseSection(llmSettingsSchema, obj.llm),
+    outreach: parseSection(outreachSchema, obj.outreach),
   };
 }
 
@@ -168,6 +187,7 @@ function deepMerge(
       },
     },
     llm: { ...base.llm, ...(patch.llm ?? {}) },
+    outreach: { ...base.outreach, ...(patch.outreach ?? {}) },
   };
 }
 

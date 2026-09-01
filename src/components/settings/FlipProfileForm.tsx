@@ -35,6 +35,13 @@ interface SettingsData {
   llm: {
     generateScopes: boolean;
   };
+  outreach: {
+    enabled: boolean;
+    initialFollowUpDays: number;
+    followUpDays: number;
+    maxFollowUps: number;
+    signature: string;
+  };
 }
 
 const DEFAULT_LIMITS: SettingsData["agent"]["limits"] = {
@@ -332,6 +339,62 @@ export default function FlipProfileForm() {
               className={field}
               value={settings.agent.maxHuntPerCycle}
               onChange={(e) => setNum(["agent", "maxHuntPerCycle"], e.target.value)}
+            />
+          </label>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-zinc-900">Acquisition outreach</h3>
+        <p className="text-xs text-zinc-500">
+          The follow-up cadence for contacting owners. When enabled, the Outreach page surfaces "due now" actions.
+          Sending an offer always stays behind the money gate.
+        </p>
+        <div className="mt-3 space-y-2">
+          <label className="flex items-center gap-2 text-sm text-zinc-700">
+            <input
+              type="checkbox"
+              checked={settings.outreach.enabled}
+              onChange={(e) => setBool(["outreach", "enabled"], e.target.checked)}
+            />
+            Enable outreach cadence
+          </label>
+          <div className="grid grid-cols-3 gap-3">
+            <label className="block">
+              <span className="text-xs font-medium text-zinc-600">Follow up after (days)</span>
+              <input
+                type="number"
+                className={field}
+                value={settings.outreach.initialFollowUpDays}
+                onChange={(e) => setNum(["outreach", "initialFollowUpDays"], e.target.value)}
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs font-medium text-zinc-600">Between follow-ups (days)</span>
+              <input
+                type="number"
+                className={field}
+                value={settings.outreach.followUpDays}
+                onChange={(e) => setNum(["outreach", "followUpDays"], e.target.value)}
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs font-medium text-zinc-600">Max follow-ups</span>
+              <input
+                type="number"
+                className={field}
+                value={settings.outreach.maxFollowUps}
+                onChange={(e) => setNum(["outreach", "maxFollowUps"], e.target.value)}
+              />
+            </label>
+          </div>
+          <label className="block">
+            <span className="text-xs font-medium text-zinc-600">Signature line</span>
+            <input
+              className={field}
+              value={settings.outreach.signature}
+              onChange={(e) => setSettings({ ...settings, outreach: { ...settings.outreach, signature: e.target.value } })}
+              placeholder="Your name / company"
             />
           </label>
         </div>
