@@ -9,6 +9,7 @@ const navLinks = [
   { href: "/leads", label: "Leads" },
   { href: "/contractors", label: "Contractors" },
   { href: "/documents", label: "Documents" },
+  { href: "/lender", label: "Lender" },
 ];
 
 export default async function AppLayout({
