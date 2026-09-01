@@ -36,6 +36,9 @@ function state(over: Partial<PlannerState> = {}): PlannerState {
     underwritings: {},
     dossiers: new Set<string>(),
     payments: {},
+    outreach: [],
+    changeOrders: [],
+    cadence: { enabled: false, initialFollowUpDays: 7, followUpDays: 14, maxFollowUps: 3, signature: "Jane Operator" },
     ...over,
   };
 }
@@ -467,5 +470,102 @@ describe("planAgentActions — Phase 3 kinds", () => {
     expect(ap!.requires_approval).toBe(true);
     expect(ap!.metadata.amount).toBe(5_000);
     expect(ap!.metadata.payment_id).toBe("p1");
+  });
+});
+
+describe("planAgentActions — outreach follow-up auto-drafting", () => {
+  const tenDaysAgo = new Date(Date.now() - 10 * 86_400_000).toISOString();
+
+  const sentOffer = {
+    deal_id: "d1",
+    kind: "initial_offer",
+    direction: "outbound",
+    status: "sent",
+    response: "none",
+    sent_at: tenDaysAgo,
+  };
+
+  it("drafts a follow-up when the cadence is due and no draft exists", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ stage: "Lead" })],
+        outreach: [sentOffer],
+        cadence: { enabled: true, initialFollowUpDays: 7, followUpDays: 14, maxFollowUps: 3, signature: "Jane Operator" },
+      })
+    );
+    const draft = plan.find((p) => p.kind === "draft_outreach");
+    expect(draft).toBeDefined();
+    expect(draft!.requires_approval).toBe(false);
+    expect(draft!.metadata.subject).toBeDefined();
+    expect(draft!.metadata.body).toContain("Jane Operator");
+  });
+
+  it("does not draft when the cadence is disabled", () => {
+    const plan = planAgentActions(
+      state({ deals: [deal({ stage: "Lead" })], outreach: [sentOffer] })
+    );
+    expect(plan.some((p) => p.kind === "draft_outreach")).toBe(false);
+  });
+
+  it("does not stack a second draft while one exists", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ stage: "Lead" })],
+        outreach: [
+          sentOffer,
+          { deal_id: "d1", kind: "follow_up", direction: "outbound", status: "draft", response: "none", sent_at: null },
+        ],
+        cadence: { enabled: true, initialFollowUpDays: 7, followUpDays: 14, maxFollowUps: 3, signature: "Jane" },
+      })
+    );
+    expect(plan.some((p) => p.kind === "draft_outreach")).toBe(false);
+  });
+
+  it("does not draft inside the follow-up window", () => {
+    const recent = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ stage: "Lead" })],
+        outreach: [{ ...sentOffer, sent_at: recent }],
+        cadence: { enabled: true, initialFollowUpDays: 7, followUpDays: 14, maxFollowUps: 3, signature: "Jane" },
+      })
+    );
+    expect(plan.some((p) => p.kind === "draft_outreach")).toBe(false);
+  });
+
+  it("never auto-drafts an initial offer", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ stage: "Lead" })],
+        outreach: [],
+        cadence: { enabled: true, initialFollowUpDays: 7, followUpDays: 14, maxFollowUps: 3, signature: "Jane" },
+      })
+    );
+    const drafts = plan.filter((p) => p.kind === "draft_outreach");
+    expect(drafts.length).toBe(0);
+  });
+});
+
+describe("planAgentActions — rehab budget overrun alert", () => {
+  it("flags a Rehab deal whose completed item blew past estimate", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ stage: "Rehab" })],
+        rehabItems: [{ id: "r1", deal_id: "d1", trade: "Roofing", status: "completed", estimated_cost: 10_000, actual_cost: 12_000 }],
+      })
+    );
+    const alert = plan.find((p) => p.kind === "info" && p.metadata.reason === "budget_overrun");
+    expect(alert).toBeDefined();
+    expect(alert!.metadata.variance).toBe(2_000);
+  });
+
+  it("stays quiet when the project is on track", () => {
+    const plan = planAgentActions(
+      state({
+        deals: [deal({ stage: "Rehab" })],
+        rehabItems: [{ id: "r1", deal_id: "d1", trade: "Roofing", status: "completed", estimated_cost: 10_000, actual_cost: 10_000 }],
+      })
+    );
+    expect(plan.some((p) => p.kind === "info" && p.metadata.reason === "budget_overrun")).toBe(false);
   });
 });

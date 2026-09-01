@@ -19,6 +19,8 @@ import {
   type PlannerRehabItem,
   type PlannerContractor,
   type PlannerRfqDraft,
+  type PlannerOutreachRow,
+  type PlannerChangeOrder,
 } from "./planner";
 import type {
   AgentRunTrigger,
@@ -208,7 +210,7 @@ export async function runAgentCycle(opts: RunOptions): Promise<RunResult> {
     }
 
     // 2) Plan + execute across all deals.
-    const state = await loadPlannerState(admin, opts.orgId);
+    const state = await loadPlannerState(admin, opts.orgId, settings);
     const plan = planAgentActions(state);
 
     for (const step of plan) {
@@ -343,6 +345,8 @@ export async function executeStep(
       return await applyRecommendListPrice(admin, runId, orgId, step);
     case "predict_exit":
       return await applyPredictExit(admin, runId, orgId, step);
+    case "draft_outreach":
+      return await applyDraftOutreach(admin, runId, orgId, step);
     case "send_rfq":
     case "send_offer":
     case "start_rehab":
@@ -615,6 +619,34 @@ async function applyChaseDocument(
     chaseReason: reason,
   });
   return { status: "skipped", reason: "no recipient email" };
+}
+
+// Auto-drafted outreach follow-up. Creates a DRAFT row in the outreach log —
+// never sends. The operator hits "send" in the Outreach page; sending stays
+// money/legal-gated. Honest: status is 'draft', never a claimed contact.
+async function applyDraftOutreach(
+  admin: ReturnType<typeof createAdminClient>,
+  runId: string,
+  orgId: string,
+  step: PlannedAction
+): ExecResult {
+  if (!step.dealId) return { status: "skipped", reason: "no dealId" };
+  const kind = (step.metadata.kind as string) ?? "follow_up";
+  const subject = (step.metadata.subject as string) ?? null;
+  const body = (step.metadata.body as string) ?? null;
+  const { error } = await admin.from("outreach").insert({
+    org_id: orgId,
+    deal_id: step.dealId,
+    kind,
+    channel: "email",
+    direction: "outbound",
+    subject,
+    body,
+    status: "draft",
+  });
+  if (error) return { status: "failed", reason: error.message };
+  await recordAction(admin, runId, orgId, step, "done", { kind, drafted: true });
+  return { status: "done" };
 }
 
 async function applyVerifyContractor(
@@ -958,7 +990,8 @@ async function recordAction(
 
 async function loadPlannerState(
   admin: ReturnType<typeof createAdminClient>,
-  orgId: string
+  orgId: string,
+  settings: OrgSettings
 ): Promise<PlannerState> {
   const deals = await admin
     .from("deals")
@@ -969,10 +1002,10 @@ async function loadPlannerState(
     .neq("stage", "Closed");
   const dealIds = ((deals.data ?? []) as Array<{ id: string }>).map((d) => d.id);
 
-  const [{ data: documents }, { data: rehabItems }, { data: contractors }, { data: uws }, { data: rfqDrafts }, { data: comps }, { data: pendingGates }, { data: recentChases }, { data: dossiers }, { data: paymentRows }] =
+  const [{ data: documents }, { data: rehabItems }, { data: contractors }, { data: uws }, { data: rfqDrafts }, { data: comps }, { data: pendingGates }, { data: recentChases }, { data: dossiers }, { data: paymentRows }, { data: outreachRows }, { data: changeOrderRows }] =
     await Promise.all([
       admin.from("documents").select("id, deal_id, rehab_item_id, doc_type, status, requested_at").eq("org_id", orgId),
-      admin.from("rehab_items").select("id, deal_id, trade, status").eq("org_id", orgId),
+      admin.from("rehab_items").select("id, deal_id, trade, status, estimated_cost, actual_cost").eq("org_id", orgId),
       admin
         .from("contractors")
         .select("id, org_id, name, email, trade, license_number, insurance_expiry, verified_at, license_checked_at")
@@ -1000,6 +1033,8 @@ async function loadPlannerState(
         .gte("created_at", new Date(Date.now() - 7 * 86_400_000).toISOString()),
       admin.from("dossiers").select("deal_id").eq("org_id", orgId),
       admin.from("payments").select("id, deal_id, rehab_item_id, amount, status").eq("org_id", orgId),
+      admin.from("outreach").select("deal_id, kind, direction, status, response, sent_at").eq("org_id", orgId),
+      admin.from("change_orders").select("rehab_item_id, status, cost_impact"),
     ]);
 
   const underwritings: PlannerState["underwritings"] = {};
@@ -1077,6 +1112,15 @@ async function loadPlannerState(
     underwritings,
     dossiers: dossiersSet,
     payments: paymentsByDeal,
+    outreach: (outreachRows ?? []) as PlannerOutreachRow[],
+    changeOrders: (changeOrderRows ?? []) as PlannerChangeOrder[],
+    cadence: {
+      enabled: settings.outreach.enabled,
+      initialFollowUpDays: settings.outreach.initialFollowUpDays,
+      followUpDays: settings.outreach.followUpDays,
+      maxFollowUps: settings.outreach.maxFollowUps,
+      signature: settings.outreach.signature,
+    },
   };
 }
 

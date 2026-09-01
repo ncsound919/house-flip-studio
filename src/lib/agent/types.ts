@@ -31,6 +31,7 @@ export type AgentActionKind =
   | "send_rfq" // MONEY GATE — requires approval
   | "send_offer" // MONEY GATE — requires approval
   | "start_rehab" // MONEY GATE — requires approval
+  | "draft_outreach" // auto-drafted follow-up (non-money, draft only — no send)
   | "info"; // diagnostic / skipped / blocked
 
 export type AgentActionStatus =

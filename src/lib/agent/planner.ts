@@ -1,5 +1,8 @@
 import { DEAL_STAGES, type DealStage } from "@/lib/types";
 import { estimateArv, type ArvEstimate } from "@/lib/arvEstimate";
+import { computeRehabBudget } from "@/lib/finance/rehabBudget";
+import { nextOutreachAction } from "@/lib/outreach/cadence";
+import { buildFollowUpEmail } from "@/lib/outreach/templates";
 import type { AgentActionKind, ApprovalPayload } from "./types";
 
 // Planner — the brain of the autonomous flip operator.
@@ -48,6 +51,8 @@ export interface PlannerRehabItem {
   deal_id: string;
   trade: string | null;
   status: string;
+  estimated_cost?: number;
+  actual_cost?: number;
 }
 
 export interface PlannerContractor {
@@ -86,6 +91,29 @@ export interface PlannerPayment {
   amount: number | null;
 }
 
+export interface PlannerOutreachRow {
+  deal_id: string;
+  kind: string;
+  direction: string;
+  status: string; // draft | sent | failed
+  response: string;
+  sent_at: string | null;
+}
+
+export interface PlannerChangeOrder {
+  rehab_item_id: string;
+  status: string;
+  cost_impact: number;
+}
+
+export interface PlannerCadence {
+  enabled: boolean;
+  initialFollowUpDays: number;
+  followUpDays: number;
+  maxFollowUps: number;
+  signature: string;
+}
+
 export interface PlannerState {
   orgId: string;
   deals: PlannerDeal[];
@@ -114,6 +142,10 @@ export interface PlannerState {
   dossiers: Set<string>;
   // Map of dealId → rehab draw ledger rows for that deal.
   payments: Record<string, PlannerPayment[]>;
+  // Outreach log + cadence (auto-draft follow-ups — non-money execution).
+  outreach: PlannerOutreachRow[];
+  changeOrders: PlannerChangeOrder[];
+  cadence: PlannerCadence;
 }
 
 export interface PlannedAction {
@@ -373,6 +405,33 @@ function planForRehab(deal: PlannerDeal, state: PlannerState, out: PlannedAction
 
   const items = state.rehabItems.filter((r) => r.deal_id === deal.id);
   const payments = state.payments[deal.id] ?? [];
+
+  // Budget alert: flag a project that has already blown past estimate. Info
+  // only — the Rehab Control page has the detail. Noise-free: at_risk is not
+  // flagged, only over_budget.
+  if (items.length > 0) {
+    const itemIds = new Set(items.map((i) => i.id));
+    const budget = computeRehabBudget(
+      items.map((i) => ({
+        id: i.id,
+        trade: i.trade,
+        status: i.status,
+        estimated_cost: i.estimated_cost ?? 0,
+        actual_cost: i.actual_cost ?? 0,
+      })),
+      state.changeOrders.filter((co) => itemIds.has(co.rehab_item_id))
+    );
+    if (budget.status === "over_budget") {
+      out.push({
+        kind: "info",
+        dealId: deal.id,
+        title: `Rehab budget overrun: ${deal.address}`,
+        detail: `Projected ${money(budget.projectedTotal)} vs original ${money(budget.originalEstimate)} (+${money(budget.variance)}). Review change orders and remaining scope.`,
+        requires_approval: false,
+        metadata: { reason: "budget_overrun", variance: budget.variance, projected: budget.projectedTotal },
+      });
+    }
+  }
 
   // Rehab draw ledger: record a payment for each contracted item that doesn't
   // have one yet (non-money — recording is bookkeeping, spending is gated).
@@ -636,6 +695,49 @@ function stale(iso: string, maxAgeDays: number): boolean {
   return daysAgo(iso) > maxAgeDays;
 }
 
+// Org-wide, run once per cycle. Auto-DRAFTS follow-ups for leads whose cadence
+// says a follow-up is due and no draft exists yet. Never auto-sends (money-legal
+// gate) and never auto-drafts initial offers — those stay operator-initiated.
+function planOutreachFollowUps(state: PlannerState, out: PlannedAction[]) {
+  if (!state.cadence.enabled) return;
+  const cfg = {
+    initialFollowUpDays: state.cadence.initialFollowUpDays,
+    followUpDays: state.cadence.followUpDays,
+    maxFollowUps: state.cadence.maxFollowUps,
+  };
+  const active = new Set(["Lead", "Inspecting", "Underwriting", "Offer Made"]);
+  const now = new Date().toISOString();
+
+  for (const deal of state.deals) {
+    if (!active.has(deal.stage)) continue;
+    const rows = state.outreach.filter((o) => o.deal_id === deal.id);
+    const { next } = nextOutreachAction(rows, now, cfg);
+    if (next !== "follow_up") continue;
+
+    const hasDraft = rows.some(
+      (o) => o.direction === "outbound" && o.status === "draft" && o.kind === "follow_up"
+    );
+    if (hasDraft) continue;
+
+    const followUpsSent = rows.filter(
+      (o) => o.direction === "outbound" && o.status === "sent" && o.kind === "follow_up"
+    ).length;
+    const { subject, body } = buildFollowUpEmail(
+      { address: deal.address, signature: state.cadence.signature },
+      followUpsSent + 1
+    );
+
+    out.push({
+      kind: "draft_outreach",
+      dealId: deal.id,
+      title: `Draft follow-up for ${deal.address}`,
+      detail: "Cadence: last contact is due for a follow-up. Draft saved for review — sending stays operator-gated.",
+      requires_approval: false,
+      metadata: { deal_id: deal.id, kind: "follow_up", subject, body },
+    });
+  }
+}
+
 // --- Entry point -------------------------------------------------------------
 
 export function planAgentActions(state: PlannerState): PlannedAction[] {
@@ -666,8 +768,9 @@ export function planAgentActions(state: PlannerState): PlannedAction[] {
         break;
     }
   }
-  // Contractor oversight is org-wide and run once per cycle.
+  // Contractor oversight + outreach follow-up drafting are org-wide, once/cycle.
   planContractorOversight(state, out);
+  planOutreachFollowUps(state, out);
   return out;
 }
 

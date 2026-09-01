@@ -51,6 +51,9 @@ function state(over: Partial<PlannerState> = {}): PlannerState {
     underwritings: {},
     dossiers: new Set<string>(),
     payments: {},
+    outreach: [],
+    changeOrders: [],
+    cadence: { enabled: false, initialFollowUpDays: 7, followUpDays: 14, maxFollowUps: 3, signature: "Jane Operator" },
     ...over,
   };
 }
