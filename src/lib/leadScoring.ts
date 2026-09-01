@@ -46,6 +46,9 @@ const DEFAULT_FLIP_PROFILE: FlipProfile = {
   statewide: true,
   counties: [],
   maxHuntPerRun: 200,
+  assessedToMarketMultiplier: 1,
+  maxPurchasePrice: 0,
+  requireDistress: false,
 };
 
 export function medianPricePerSqft(county: string): number {

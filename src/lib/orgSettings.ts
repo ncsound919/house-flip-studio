@@ -15,6 +15,15 @@ export const flipProfileSchema = z.object({
   statewide: z.boolean().default(true),
   counties: z.array(z.string()).default([]),
   maxHuntPerRun: z.number().default(200),
+  // Bank-readiness of the hunt: assessed value is NOT purchase price. NC
+  // counties assess at a fraction of market, so a $150k-assessed home can cost
+  // $250k+. maxPurchasePrice (0 = off) drops any lead whose estimated market
+  // price (assessed × assessedToMarketMultiplier) exceeds your real budget.
+  assessedToMarketMultiplier: z.number().default(1),
+  maxPurchasePrice: z.number().default(0),
+  // Distress-only mode: reject leads with zero motivation signals so every
+  // accepted lead has a documented "why it's cheap" reason.
+  requireDistress: z.boolean().default(false),
 });
 
 export const underwritingSchema = z.object({
@@ -59,6 +68,9 @@ export const DEFAULT_SETTINGS: OrgSettings = {
     statewide: true,
     counties: [],
     maxHuntPerRun: 200,
+    assessedToMarketMultiplier: 1,
+    maxPurchasePrice: 0,
+    requireDistress: false,
   },
   underwriting: {
     rehabPerSqft: 40,

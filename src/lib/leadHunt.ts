@@ -23,6 +23,8 @@ export interface HuntResult {
   scanned: number;
   newLeads: number;
   duplicates: number;
+  filtered: number;
+  filterReasons: Record<string, number>;
   warnings: string[];
   summary: { county: string; houses: number }[];
   tiers?: { hot: number; warm: number; cold: number };
@@ -94,6 +96,8 @@ export async function huntLeads(config: HuntConfig): Promise<HuntResult> {
     scanned: 0,
     newLeads: 0,
     duplicates: 0,
+    filtered: 0,
+    filterReasons: {},
     warnings: [],
     summary: [],
     tiers: { hot: 0, warm: 0, cold: 0 },
@@ -185,6 +189,28 @@ async function processListings(
     knownAddresses.add(addrKey);
     if (pinKey) knownPins.add(pinKey);
 
+    // Affordability gate: assessed value is NOT purchase price. NC counties
+    // assess below market; the multiplier converts to an estimated market price
+    // and maxPurchasePrice enforces the operator's real budget. Off by default.
+    const assessed = listing.parcel?.assessedValue;
+    if (flipProfile.maxPurchasePrice > 0 && assessed != null) {
+      const effectivePrice = Math.round(assessed * flipProfile.assessedToMarketMultiplier);
+      if (effectivePrice > flipProfile.maxPurchasePrice) {
+        result.filtered++;
+        result.filterReasons.affordability = (result.filterReasons.affordability ?? 0) + 1;
+        continue;
+      }
+    }
+
+    // Distress-only mode: reject leads with no motivation signal, so every
+    // accepted lead has a documented "why it's cheap" reason.
+    const reasonCount = listing.motivation?.reasonCount ?? 0;
+    if (flipProfile.requireDistress && reasonCount === 0) {
+      result.filtered++;
+      result.filterReasons.distress = (result.filterReasons.distress ?? 0) + 1;
+      continue;
+    }
+
     const { score, tier } = scoreAndTier(listing, flipProfile);
     if (result.tiers) result.tiers[tier]++;
 
@@ -192,7 +218,12 @@ async function processListings(
       ? `Motivation: ${listing.motivation.reasons.join("; ")}`
       : "";
 
-    const tierNotes = `Tier: ${tierLabel(tier)} (score ${score.attentionScore}/100, ${score.rating}, ${listing.motivation?.reasonCount ?? 0} motivation signal${(listing.motivation?.reasonCount ?? 0) === 1 ? "" : "s"})`;
+    const effectivePriceNote =
+      flipProfile.maxPurchasePrice > 0 && listing.parcel?.assessedValue != null
+        ? `Est. market price: $${Math.round(listing.parcel.assessedValue * flipProfile.assessedToMarketMultiplier).toLocaleString("en-US")} (assessed ${flipProfile.assessedToMarketMultiplier}x)`
+        : "";
+
+    const tierNotes = `Tier: ${tierLabel(tier)} (score ${score.attentionScore}/100, ${score.rating}, ${reasonCount} motivation signal${reasonCount === 1 ? "" : "s"})`;
 
     const notes = [
       `Auto-found by lead hunt (${listing.source_label}).`,
@@ -201,6 +232,10 @@ async function processListings(
       listing.parcel?.owner ? `Owner: ${listing.parcel.owner}` : "",
       listing.parcel?.assessedValue
         ? `Assessed value: $${listing.parcel.assessedValue.toLocaleString("en-US")}`
+        : "",
+      effectivePriceNote,
+      listing.parcel?.mailingState
+        ? `Owner mailing state: ${listing.parcel.mailingState}`
         : "",
       listing.parcel?.acreage ? `Acreage: ${listing.parcel.acreage}` : "",
       listing.parcel?.lastSaleDate ? `Last sold: ${listing.parcel.lastSaleDate}` : "",

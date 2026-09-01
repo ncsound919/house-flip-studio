@@ -9,6 +9,9 @@ interface SettingsData {
     statewide: boolean;
     counties: string[];
     maxHuntPerRun: number;
+    assessedToMarketMultiplier: number;
+    maxPurchasePrice: number;
+    requireDistress: boolean;
   };
   underwriting: {
     rehabPerSqft: number;
@@ -190,6 +193,46 @@ export default function FlipProfileForm() {
               onChange={(e) => setNum(["flipProfile", "maxHuntPerRun"], e.target.value)}
             />
           </label>
+          <label className="block">
+            <span className="text-xs font-medium text-zinc-600">Max purchase price (0 = off)</span>
+            <input
+              type="number"
+              className={field}
+              value={settings.flipProfile.maxPurchasePrice}
+              onChange={(e) => setNum(["flipProfile", "maxPurchasePrice"], e.target.value)}
+            />
+            <span className="mt-1 block text-[11px] text-zinc-400">
+              Assessed value ≠ purchase price. Drops leads whose estimated market price exceeds your real budget.
+            </span>
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-zinc-600">Assessed → market multiplier</span>
+            <input
+              type="number"
+              step="0.1"
+              className={field}
+              value={settings.flipProfile.assessedToMarketMultiplier}
+              onChange={(e) => setNum(["flipProfile", "assessedToMarketMultiplier"], e.target.value)}
+            />
+            <span className="mt-1 block text-[11px] text-zinc-400">
+              NC counties assess below market. 1 = assessed value as-is; 1.5 = assume market is 1.5× assessed.
+            </span>
+          </label>
+        </div>
+        <div className="mt-3">
+          <label className="flex items-center gap-2 text-sm text-zinc-700">
+            <input
+              type="checkbox"
+              checked={settings.flipProfile.requireDistress}
+              onChange={(e) =>
+                patch({ flipProfile: { ...settings.flipProfile, requireDistress: e.target.checked } })
+              }
+            />
+            Distress-only: reject leads with zero motivation signals
+          </label>
+          <span className="mt-1 block text-[11px] text-zinc-400">
+            Every accepted lead must have a documented reason it's cheap (absentee, out-of-state, long-held, or older home).
+          </span>
         </div>
         {settings.flipProfile.statewide && settings.flipProfile.counties.length > 0 ? (
           <p className="mt-2 text-xs text-amber-600">

@@ -41,18 +41,44 @@ export function parcelSourceForCounty(county: string): CountyParcelSource {
 // Motivation signals computed from the public record. These are the reasons a
 // house is cheap at $30k–$150k — the whole point of this budget band.
 // Each signal is a documented, editable heuristic — never invented.
+//
+// HONESTY: the NC OneMap parcel layer does NOT expose a tax-delinquency flag or
+// an owner-count field (verified against the live service schema). The mapper
+// still reads them if a future/source layer provides them, but against the live
+// feed multiParcelOwner and taxDelinquent stay false — never fabricated.
 export interface Motivation {
   absenteeOwner: boolean; // mailing address differs from site address
   outOfStateOwner: boolean; // mailing state ≠ NC
   longHeld: boolean; // owned > 15 years (low basis, flexible seller)
   olderHome: boolean; // structure year < 1980 (rehab upside, less competition)
-  multiParcelOwner: boolean; // same owner across >= 3 parcels (portfolio owner)
-  taxDelinquent: boolean; // county tax-delinquency flag on the record
+  multiParcelOwner: boolean; // same owner across >= 3 parcels (when exposed)
+  taxDelinquent: boolean; // county tax-delinquency flag (when exposed)
+  mailingState?: string; // derived state (mstate field or parsed from mailadd)
   reasonCount: number; // count of active motivation signals (0–6)
   reasons: string[];
 }
 
 const NC_STATE_CODES = new Set(["NC", "N.C.", "NORTH CAROLINA"]);
+
+const US_STATE_CODES = new Set([
+  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY",
+  "LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND",
+  "OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC",
+]);
+
+// Many counties leave mstate blank and embed the state in the mailing-address
+// free text ("5359 ANVIL CT FAIRFAX, VA 22030"). Derive it defensively: prefer
+// the structured field, else scan the text for "<STATE> <ZIP5>" with a real
+// state code. Returns undefined when not derivable — never a guess.
+function deriveMailingState(mstate: unknown, mailadd: unknown): string | undefined {
+  const direct = String(mstate ?? "").trim().toUpperCase();
+  if (US_STATE_CODES.has(direct)) return direct;
+  const text = String(mailadd ?? "").toUpperCase();
+  for (const m of text.matchAll(/\b([A-Z]{2})\s*\d{5}\b/g)) {
+    if (US_STATE_CODES.has(m[1])) return m[1];
+  }
+  return undefined;
+}
 
 function computeMotivation(a: Record<string, unknown>): Motivation {
   const reasons: string[] = [];
@@ -66,7 +92,7 @@ function computeMotivation(a: Record<string, unknown>): Motivation {
   // 2. Out-of-state owner: mailing state is not NC. Strong motivation signal —
   // out-of-state owners are the most motivated sellers for cash/investor offers.
   let outOfStateOwner = false;
-  const mailingState = String(a.mstate ?? "").trim().toUpperCase();
+  const mailingState = deriveMailingState(a.mstate, a.mailadd);
   if (mailingState && !NC_STATE_CODES.has(mailingState)) {
     outOfStateOwner = true;
     reasons.push(`Out-of-state owner (${mailingState})`);
@@ -106,6 +132,7 @@ function computeMotivation(a: Record<string, unknown>): Motivation {
     olderHome,
     multiParcelOwner,
     taxDelinquent,
+    mailingState,
     reasonCount: reasons.length,
     reasons,
   };
@@ -140,7 +167,7 @@ export function mapParcel(a: Record<string, unknown>): ListingCard {
         ? new Date(Number(a.saledate)).toISOString().slice(0, 10)
         : undefined,
       mailingAddress: String(a.mailadd ?? "") || undefined,
-      mailingState: String(a.mstate ?? "").trim() || undefined,
+      mailingState: motivation.mailingState,
     },
     motivation,
   };
@@ -175,13 +202,19 @@ export async function fetchCountyParcels(params: {
   conditions.push("siteadd IS NOT NULL");
   conditions.push("siteadd <> ''");
   conditions.push("structyear > 0");
+  // Structure indicator 'Y' cuts ~40k+ unimproved/vacant parcels that carry a
+  // year but no building — the "expensive-looking" land that made hunts noisy.
+  // Verified against the live layer: struct values are Y/N/blank.
+  conditions.push("struct = 'Y'");
 
   const where = conditions.length ? conditions.join(" AND ") : "1=1";
 
+  // Verified against the live NC OneMap schema: `ownercount` and `taxdelinquent`
+  // DO NOT exist on this layer and 400 the whole query. Use only real fields.
   const outFields = [
-    "parno", "ownname", "siteadd", "scity", "mailadd", "mstate",
+    "parno", "ownname", "siteadd", "scity", "mailadd", "mstate", "szip", "sstate",
     "parval", "landval", "improvval", "gisacres", "saledate", "structyear", "cntyname",
-    "ownercount", "taxdelinquent",
+    "struct", "structno", "subdivisio", "reviseyear", "presentval", "parusedesc", "owntype",
   ].join(",");
 
   // Deterministic day-based rotation so successive hunts surface different
@@ -214,10 +247,16 @@ export async function fetchCountyParcels(params: {
   }
 }
 
-// Rotation: even day-of-year → cheapest first (parval asc); odd → newest
-// structures first (structyear desc). Deterministic, no randomness, testable.
+// Rotation: rotate deterministically through three distressed/cheap orderings
+// so successive hunts surface different kinds of inventory instead of
+// re-reading the same cheapest band every run:
+//   parval ASC      — cheapest assessed first
+//   structyear ASC  — oldest homes first (most rehab upside)
+//   improvval ASC   — lowest building value first (cheapest to buy)
+// Deterministic, no randomness, testable.
 export function rotationOrderBy(now: Date = new Date()): string {
   const start = new Date(now.getFullYear(), 0, 0);
   const dayOfYear = Math.floor((now.getTime() - start.getTime()) / 86_400_000);
-  return dayOfYear % 2 === 0 ? "parval ASC" : "structyear DESC";
+  const orders = ["parval ASC", "structyear ASC", "improvval ASC"];
+  return orders[dayOfYear % orders.length];
 }

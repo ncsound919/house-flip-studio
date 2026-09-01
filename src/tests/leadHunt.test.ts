@@ -3,6 +3,7 @@ import { huntLeads, scoreListings } from "../lib/leadHunt";
 import { fetchCountyParcels, mapParcel } from "../lib/listingSources/countyParcels";
 import { scoreAndTier } from "../lib/leadTier";
 import type { ListingCard } from "../lib/listingSources/types";
+import { DEFAULT_SETTINGS } from "../lib/orgSettings";
 import * as apiHelpers from "../lib/apiHelpers";
 
 // NC OneMap statewide parcel JSON structure.
@@ -247,6 +248,83 @@ describe("huntLeads", () => {
     expect(calls).toBeGreaterThanOrEqual(2);
     expect(result.scanned).toBe(150);
     expect(result.newLeads).toBe(150);
+  });
+
+  function settingsWith(patch: Partial<typeof DEFAULT_SETTINGS.flipProfile>) {
+    return { ...DEFAULT_SETTINGS, flipProfile: { ...DEFAULT_SETTINGS.flipProfile, ...patch } };
+  }
+
+  it("filters out leads whose estimated market price exceeds the operator's max purchase price", async () => {
+    setup();
+    // flipProfileJson parval is 30000. With multiplier 1 and a $20k budget cap,
+    // the estimated market price (30k) exceeds the budget → filtered, not inserted.
+    const result = await huntLeads({
+      orgId: "org-1",
+      statewide: true,
+      maxTotal: 50,
+      settings: settingsWith({ maxPurchasePrice: 20_000, assessedToMarketMultiplier: 1 }),
+    });
+    expect(result.filtered).toBe(1);
+    expect(result.filterReasons.affordability).toBe(1);
+    expect(result.newLeads).toBe(0);
+  });
+
+  it("does not filter when maxPurchasePrice is off (0)", async () => {
+    setup();
+    const result = await huntLeads({
+      orgId: "org-1",
+      statewide: true,
+      maxTotal: 50,
+      settings: settingsWith({ maxPurchasePrice: 0 }),
+    });
+    expect(result.filtered).toBe(0);
+    expect(result.newLeads).toBe(1);
+  });
+
+  it("rejects leads with zero motivation signals in distress-only mode", async () => {
+    // Local, recent, newer construction → zero motivation signals.
+    const localCard = {
+      features: [{
+        attributes: {
+          parno: "9999999999",
+          ownname: "LOCAL, JANE",
+          siteadd: "1 HOME RD",
+          scity: "Raleigh",
+          mailadd: "1 HOME RD",
+          mstate: "NC",
+          parval: 80_000,
+          landval: 30_000,
+          impropval: 50_000,
+          gisacres: 0.3,
+          saledate: 1_700_000_000_000,
+          structyear: 2005,
+          cntyname: "Wake",
+          struct: "Y",
+        },
+      }],
+    };
+    setup(localCard);
+    const result = await huntLeads({
+      orgId: "org-1",
+      statewide: true,
+      maxTotal: 50,
+      settings: settingsWith({ requireDistress: true }),
+    });
+    expect(result.filtered).toBe(1);
+    expect(result.filterReasons.distress).toBe(1);
+    expect(result.newLeads).toBe(0);
+  });
+
+  it("accepts distressed leads in distress-only mode", async () => {
+    setup();
+    // flipProfileJson parcel is older (1901) → olderHome motivation signal.
+    const result = await huntLeads({
+      orgId: "org-1",
+      statewide: true,
+      maxTotal: 50,
+      settings: settingsWith({ requireDistress: true }),
+    });
+    expect(result.newLeads).toBe(1);
   });
 });
 
